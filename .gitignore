@@ -1,0 +1,38 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Local build tools and generated Android outputs
+.build_cache/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+*.idsig
+*.class
+
+# Signing credentials and private environment files
+*.jks
+*.keystore
+*.p12
+
+# Python runtime outputs
+__pycache__/
+*.py[cod]
+
+# Historical binaries, device captures, and personal-data backups stay local.
+# Keep helper/probe source files, including the documented offline build entry.
+/legacy-downloads-*/
+/cache-review-*/
+/device-test-*/*
+!/device-test-*/*.ps1
+!/device-test-*/*.java
+/device-test-*.png
+/import-*/*
+!/import-*/*.py

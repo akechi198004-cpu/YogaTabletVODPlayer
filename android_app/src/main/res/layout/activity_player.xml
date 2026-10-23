@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/player_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- Media3 ExoPlayer view with custom TV remote controls below. -->
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/video_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_centerInParent="true" />
+
+    <!-- Cinematic Cyber Loading Overlay -->
+    <include
+        android:id="@+id/player_loading_layout"
+        layout="@layout/layout_loading_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Resume Toast Notice -->
+    <TextView
+        android:id="@+id/player_resume_toast"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentTop="true"
+        android:layout_marginStart="20dp"
+        android:layout_marginTop="64dp"
+        android:background="@drawable/bg_pill"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:text="已为您自动定位到上次播放 00:00"
+        android:textColor="@color/accent_cyan"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
+    <!-- Overlay Controls Container -->
+    <RelativeLayout
+        android:id="@+id/player_controls_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#66000000">
+
+        <!-- Top Header Bar (Spacious 2-tier layout for portrait orientation) -->
+        <LinearLayout
+            android:id="@+id/player_top_bar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_alignParentTop="true"
+            android:orientation="vertical"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:background="#88000000">
+
+            <!-- Row 1: Back on left, Orientation Switcher on right -->
+            <RelativeLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <Button
+                    android:id="@+id/player_btn_back"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_alignParentStart="true"
+                    android:background="@drawable/bg_pill"
+                    android:text="〈 返回"
+                    android:textColor="@color/text_white"
+                    android:textSize="12sp"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp" />
+
+                <!-- Top Dedicated Orientation Switcher -->
+                <Button
+                    android:id="@+id/player_btn_top_orientation"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_alignParentEnd="true"
+                    android:background="@drawable/bg_pill"
+                    android:text="🔄 横屏"
+                    android:textColor="@color/accent_cyan"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp" />
+            </RelativeLayout>
+
+            <!-- Row 2: Title & Episode Badge with plenty of space -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="5dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/player_title"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/text_white"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:singleLine="true"
+                    android:ellipsize="end" />
+
+                <TextView
+                    android:id="@+id/player_ep_badge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_pill"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp"
+                    android:textColor="@color/accent_cyan"
+                    android:textSize="11sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Center Controls: Rewind 10s, Play/Pause, Forward 10s -->
+        <LinearLayout
+            android:id="@+id/player_center_cluster"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerInParent="true"
+            android:orientation="horizontal"
+            android:gravity="center">
+
+            <ImageButton
+                android:id="@+id/player_btn_rewind"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:padding="16dp"
+                android:src="@drawable/ic_player_rewind"
+                android:contentDescription="后退10秒"
+                android:nextFocusRight="@id/player_btn_play_pause"
+                android:nextFocusDown="@id/player_seekbar"
+                android:background="@drawable/bg_pill"
+                />
+
+            <ImageButton
+                android:id="@+id/player_btn_play_pause"
+                android:layout_width="80dp"
+                android:layout_height="80dp"
+                android:padding="20dp"
+                android:src="@drawable/ic_player_play"
+                android:contentDescription="播放"
+                android:nextFocusLeft="@id/player_btn_rewind"
+                android:nextFocusRight="@id/player_btn_forward"
+                android:nextFocusUp="@id/player_btn_back"
+                android:nextFocusDown="@id/player_seekbar"
+                android:layout_marginStart="24dp"
+                android:layout_marginEnd="24dp"
+                android:background="@drawable/bg_gradient_button" />
+
+            <ImageButton
+                android:id="@+id/player_btn_forward"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:padding="16dp"
+                android:src="@drawable/ic_player_forward"
+                android:contentDescription="前进10秒"
+                android:nextFocusLeft="@id/player_btn_play_pause"
+                android:nextFocusDown="@id/player_seekbar"
+                android:background="@drawable/bg_pill"
+                />
+        </LinearLayout>
+
+        <!-- Bottom Controller Bar -->
+        <LinearLayout
+            android:id="@+id/player_bottom_bar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_alignParentBottom="true"
+            android:orientation="vertical"
+            android:padding="12dp"
+            android:background="#99000000">
+
+            <!-- Scrub SeekBar -->
+            <SeekBar
+                android:id="@+id/player_seekbar"
+                android:contentDescription="播放进度，左右键调整"
+                android:nextFocusUp="@id/player_btn_play_pause"
+                android:nextFocusDown="@id/player_btn_speed"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="1000" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/player_time_display"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="00:00 / 00:00"
+                    android:textColor="@color/text_white"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/player_btn_speed"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:background="@drawable/bg_pill"
+                    android:text="1.0x"
+                    android:textColor="@color/accent_cyan"
+                    android:textSize="11sp"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp" />
+
+                <Button
+                    android:id="@+id/player_btn_next_ep"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_pill"
+                    android:text="下一集"
+                    android:textColor="@color/text_white"
+                    android:textSize="11sp"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp" />
+
+                <Button
+                    android:id="@+id/player_btn_orientation"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_pill"
+                    android:text="🔄 横屏"
+                    android:textColor="@color/accent_cyan"
+                    android:textSize="11sp"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp" />
+            </LinearLayout>
+
+            <!-- Line Selectors & Episode Quick Select -->
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/player_lines_row"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal" />
+            </HorizontalScrollView>
+        </LinearLayout>
+    </RelativeLayout>
+</RelativeLayout>

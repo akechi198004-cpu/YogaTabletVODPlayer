@@ -1,0 +1,6 @@
+{
+  "name": "HM影视 - Android 客户端开发与 APK 下载中心",
+  "description": "HM影视原生 Android (Kotlin) 客户端，包含完整编译签名的 APK 安装包下载、Kotlin 源码架构浏览器与在线交互式预览中心。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

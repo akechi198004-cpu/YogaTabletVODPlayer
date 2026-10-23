@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-main: #07090e;
+    --bg-elevated: #0d111a;
+    --accent-cyan: #00d2ff;
+    --accent-blue: #3a7bd5;
+  }
+  body {
+    background-color: #07090e;
+    color: #f8fafc;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+}
+
+@keyframes danmaku {
+  0% {
+    transform: translateX(100vw);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Custom modern scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.02);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 210, 255, 0.4);
+}
+
+@keyframes progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+.tv-focusable:focus-visible,
+#hm-tv-screen [data-tv-focusable="true"]:focus-visible {
+  outline: 3px solid #22d3ee;
+  outline-offset: 4px;
+  transform: scale(1.035);
+  position: relative;
+  z-index: 3;
+  box-shadow: 0 0 0 6px rgba(34, 211, 238, 0.2), 0 16px 36px rgba(0, 0, 0, 0.45);
+}

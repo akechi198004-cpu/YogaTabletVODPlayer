@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_main">#0d1118</color>
+    <color name="bg_elevated">#19212c</color>
+    <color name="bg_panel">#1d2734</color>
+    <color name="bg_panel_strong">#263346</color>
+    <color name="accent_cyan">#b6c9e2</color>
+    <color name="accent_blue">#526e91</color>
+    <color name="accent_glow">#40526e91</color>
+    <color name="text_white">#f4f5f7</color>
+    <color name="text_soft">#cbd5e1</color>
+    <color name="text_muted">#9ca6b5</color>
+    <color name="border_subtle">#35404f</color>
+    <color name="border_focus">#eaf1ff</color>
+    <color name="card_stroke">#35404f</color>
+</resources>
