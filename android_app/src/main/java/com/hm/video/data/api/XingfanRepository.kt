@@ -310,7 +310,8 @@ object XingfanRepository {
 
     fun getHome(forceRefresh: Boolean = false): HomeData {
         val key = "home"
-        return loadWithCache(homeCache, key, typeHome, CachePolicy.HOME, forceRefresh) { etag, lastModified ->
+        return loadWithCache(homeCache, key, typeHome, CachePolicy.HOME, forceRefresh,
+            shouldCache = { it.hero.isNotEmpty() || it.recent.isNotEmpty() }) { etag, lastModified ->
             val page = XingfanClient.fetchPageWithValidators("/", etag = etag, lastModified = lastModified)
             if (page.notModified) {
                 NetworkResult(null, page.etag, page.lastModified, notModified = true)
@@ -336,7 +337,8 @@ object XingfanRepository {
     ): PageResult {
         val urlPath = XingfanClient.buildListUrl(cat, page, type, area, year, letter, sort)
         val key = "list:$urlPath"
-        return loadWithCache(listCache, key, typePage, CachePolicy.LIST, forceRefresh) { etag, lastModified ->
+        return loadWithCache(listCache, key, typePage, CachePolicy.LIST, forceRefresh,
+            shouldCache = { it.items.isNotEmpty() }) { etag, lastModified ->
             val response = XingfanClient.fetchPageWithValidators(urlPath, etag = etag, lastModified = lastModified)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
@@ -353,7 +355,8 @@ object XingfanRepository {
     fun search(keyword: String, cid: Int? = null, page: Int = 1, forceRefresh: Boolean = false): PageResult {
         val urlPath = XingfanClient.buildSearchUrl(keyword, cid, page)
         val key = "search:$urlPath"
-        return loadWithCache(listCache, key, typePage, CachePolicy.SEARCH, forceRefresh) { etag, lastModified ->
+        return loadWithCache(listCache, key, typePage, CachePolicy.SEARCH, forceRefresh,
+            shouldCache = { it.items.isNotEmpty() }) { etag, lastModified ->
             val response = XingfanClient.fetchPageWithValidators(urlPath, etag = etag, lastModified = lastModified)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
@@ -369,7 +372,8 @@ object XingfanRepository {
 
     fun getDailyUpdates(forceRefresh: Boolean = false): List<WorkItem> {
         val key = "daily"
-        return loadWithCache(dailyCache, key, typeWorkItems, CachePolicy.DAILY, forceRefresh) { etag, lastModified ->
+        return loadWithCache(dailyCache, key, typeWorkItems, CachePolicy.DAILY, forceRefresh,
+            shouldCache = { it.isNotEmpty() }) { etag, lastModified ->
             val response = XingfanClient.fetchPageWithValidators("/new.html", etag = etag, lastModified = lastModified)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
@@ -385,7 +389,8 @@ object XingfanRepository {
 
     fun getTopBoards(forceRefresh: Boolean = false): TopBoards {
         val key = "top"
-        return loadWithCache(topCache, key, typeTop, CachePolicy.TOP, forceRefresh) { etag, lastModified ->
+        return loadWithCache(topCache, key, typeTop, CachePolicy.TOP, forceRefresh,
+            shouldCache = { it.day.isNotEmpty() || it.week.isNotEmpty() || it.month.isNotEmpty() }) { etag, lastModified ->
             val response = XingfanClient.fetchPageWithValidators("/top.html", etag = etag, lastModified = lastModified)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)

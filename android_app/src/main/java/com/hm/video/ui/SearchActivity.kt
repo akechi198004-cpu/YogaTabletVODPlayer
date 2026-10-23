@@ -9,6 +9,7 @@ import android.os.Looper
 import android.view.View
 import android.widget.*
 import com.hm.video.R
+import com.hm.video.HMVideoApplication
 import com.hm.video.data.api.XingfanRepository
 import com.hm.video.data.model.WorkItem
 import com.hm.video.util.LoadingViewHelper
@@ -42,6 +43,7 @@ class SearchActivity : Activity() {
         resultsContainer = findViewById(R.id.search_results_container)
         hotTagsContainer = findViewById(R.id.search_hot_tags_container)
         histTagsContainer = findViewById(R.id.search_hist_tags_container)
+        searchHistory.addAll(HMVideoApplication.instance.storageManager.getSearchHistory())
 
         findViewById<Button>(R.id.search_btn_back).setOnClickListener { finish() }
         findViewById<Button>(R.id.search_btn_submit).setOnClickListener {
@@ -49,6 +51,7 @@ class SearchActivity : Activity() {
         }
 
         findViewById<Button>(R.id.search_btn_clear_hist).setOnClickListener {
+            HMVideoApplication.instance.storageManager.clearSearchHistory()
             searchHistory.clear()
             renderHistoryTags()
         }
@@ -178,11 +181,11 @@ class SearchActivity : Activity() {
         val requestId = ++searchRequestId
         val requestedCid = currentCid
         val requestedPage = currentPage
-        if (!searchHistory.contains(keyword)) {
-            searchHistory.add(0, keyword)
-            if (searchHistory.size > 10) searchHistory.removeAt(searchHistory.size - 1)
-            renderHistoryTags()
-        }
+        val storage = HMVideoApplication.instance.storageManager
+        storage.recordSearch(keyword)
+        searchHistory.clear()
+        searchHistory.addAll(storage.getSearchHistory())
+        renderHistoryTags()
 
         discoveryLayout.visibility = View.GONE
         resultsContainer.visibility = View.VISIBLE

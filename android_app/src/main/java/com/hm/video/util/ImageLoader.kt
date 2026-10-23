@@ -38,11 +38,14 @@ import okhttp3.Call
  */
 object ImageLoader {
 
+    private data class MemoryKey(val url: String, val width: Int, val height: Int)
+    private data class MemoryEntry(val bitmap: Bitmap, val fetchedAt: Long)
+
     private val maxMemory = (Runtime.getRuntime().maxMemory() / 1024).toInt()
     private val cacheSize = (maxMemory / 10).coerceIn(1024 * 2, 1024 * 12)
-    private val memoryCache = object : LruCache<String, Bitmap>(cacheSize) {
-        override fun sizeOf(key: String, bitmap: Bitmap): Int {
-            return bitmap.byteCount / 1024
+    private val memoryCache = object : LruCache<MemoryKey, MemoryEntry>(cacheSize) {
+        override fun sizeOf(key: MemoryKey, value: MemoryEntry): Int {
+            return (value.bitmap.byteCount / 1024).coerceAtLeast(1)
         }
     }
 
@@ -99,20 +102,31 @@ object ImageLoader {
             return
         }
 
-        val cached = memoryCache.get(url)
+        if (!imageView.isAttachedToWindow) return
+        // Wait for real bounds instead of decoding a hero banner at poster fallback dimensions.
+        if (imageView.width <= 0 || imageView.height <= 0) {
+            imageView.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
+                override fun onLayoutChange(view: View, left: Int, top: Int, right: Int, bottom: Int,
+                    oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int) {
+                    if (right <= left || bottom <= top) return
+                    view.removeOnLayoutChangeListener(this)
+                    if (isCurrent(imageView, requestedUrl)) load(imageView, requestedUrl)
+                }
+            })
+            return
+        }
+        val targetWidth = imageView.width
+        val targetHeight = imageView.height
+        val memoryKey = MemoryKey(url, targetWidth, targetHeight)
+        val cached = memoryCache.get(memoryKey)
         if (cached != null) {
-            imageView.setImageBitmap(cached)
+            imageView.setImageBitmap(cached.bitmap)
+            diskCache?.let { maybeRevalidate(url, it, cached.fetchedAt) }
             return
         }
 
         // Set placeholder color / background
         imageView.setBackgroundColor(0xFF121620.toInt())
-        if (!imageView.isAttachedToWindow) return
-
-        val density = imageView.resources.displayMetrics.density
-        val targetWidth = imageView.width.takeIf { it > 0 } ?: (240 * density).toInt()
-        val targetHeight = imageView.height.takeIf { it > 0 } ?: (360 * density).toInt()
-
         try {
             executor.execute {
                 if (!isCurrent(imageView, requestedUrl)) return@execute
@@ -122,7 +136,7 @@ object ImageLoader {
                 if (diskEntry != null) {
                     val bitmap = decode(diskEntry.payload, diskEntry.offset, diskEntry.length, targetWidth, targetHeight)
                     if (bitmap != null) {
-                        memoryCache.put(url, bitmap)
+                        memoryCache.put(memoryKey, MemoryEntry(bitmap, diskEntry.fetchedAt))
                         postBitmap(imageView, requestedUrl, bitmap)
                         maybeRevalidate(url, disk, diskEntry.fetchedAt)
                         return@execute
@@ -167,6 +181,7 @@ object ImageLoader {
                 call.execute().use { response ->
                     if (response.code == 404 || response.code == 410) {
                         diskCache?.remove(url)
+                        removeMemory(url)
                         return
                     }
                     if (!response.isSuccessful) return
@@ -174,7 +189,7 @@ object ImageLoader {
                     val bytes = stream?.use { readBounded(it, CacheConfig.IMAGE_MAX_ENTRY_BYTES.toInt()) } ?: return
                     if (!isCurrent(imageView, requestedUrl)) return
                     val bitmap = decode(bytes, 0, bytes.size, targetWidth, targetHeight) ?: return
-                    memoryCache.put(url, bitmap)
+                    memoryCache.put(MemoryKey(url, targetWidth, targetHeight), MemoryEntry(bitmap, System.currentTimeMillis()))
                     diskCache?.put(url, bytes)
                     postBitmap(imageView, requestedUrl, bitmap)
                 }
@@ -206,14 +221,23 @@ object ImageLoader {
                         .build()
                     XingfanClient.httpClient.newCall(request).execute().use { response ->
                         when {
-                            response.code == 304 -> disk.markValidated(url)
-                            response.code == 404 || response.code == 410 -> disk.remove(url)
+                            response.code == 304 -> {
+                                disk.markValidated(url)
+                                val now = System.currentTimeMillis()
+                                memoryCache.snapshot().filterKeys { it.url == url }.forEach { (key, value) ->
+                                    memoryCache.put(key, value.copy(fetchedAt = now))
+                                }
+                            }
+                            response.code == 404 || response.code == 410 -> {
+                                disk.remove(url)
+                                removeMemory(url)
+                            }
                             response.isSuccessful -> {
                                 val bytes = response.body?.byteStream()
                                     ?.use { readBounded(it, CacheConfig.IMAGE_MAX_ENTRY_BYTES.toInt()) }
                                 if (bytes != null && isDecodable(bytes, 0, bytes.size)) {
                                     disk.put(url, bytes)
-                                    memoryCache.remove(url)
+                                    removeMemory(url)
                                 }
                             }
                         }
@@ -227,6 +251,10 @@ object ImageLoader {
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             revalidating.remove(url)
         }
+    }
+
+    private fun removeMemory(url: String) {
+        memoryCache.snapshot().keys.filter { it.url == url }.forEach { memoryCache.remove(it) }
     }
 
     private fun postBitmap(imageView: ImageView, requestedUrl: String, bitmap: Bitmap) {
@@ -255,7 +283,7 @@ object ImageLoader {
             BitmapFactory.decodeByteArray(bytes, offset, length, bounds)
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
             var sample = 1
-            while (bounds.outWidth / sample > targetWidth * 2 || bounds.outHeight / sample > targetHeight * 2 ||
+            while ((bounds.outWidth / sample > targetWidth * 2 && bounds.outHeight / sample > targetHeight * 2) ||
                 bounds.outWidth.toLong() * bounds.outHeight / (sample.toLong() * sample) > 4_000_000L) {
                 sample *= 2
             }

@@ -15,6 +15,29 @@ class UserStorageManager(context: Context) {
 
     private val favKey = "favorites_list"
     private val histKey = "history_list"
+    private val searchKey = "search_history"
+
+    fun getSearchHistory(): List<String> {
+        val json = prefs.getString(searchKey, null) ?: return emptyList()
+        return try {
+            val type = object : TypeToken<List<String?>>() {}.type
+            gson.fromJson<List<String?>>(json, type).orEmpty()
+                .filterNotNull().filter { it.isNotBlank() }.distinct().take(10)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun recordSearch(keyword: String) {
+        val trimmed = keyword.trim()
+        if (trimmed.isEmpty()) return
+        val history = (listOf(trimmed) + getSearchHistory()).distinct().take(10)
+        prefs.edit().putString(searchKey, gson.toJson(history)).apply()
+    }
+
+    fun clearSearchHistory() {
+        prefs.edit().remove(searchKey).apply()
+    }
 
     fun getFavorites(): MutableList<FavoriteItem> {
         val json = prefs.getString(favKey, null) ?: return mutableListOf()

@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.View
 import android.widget.*
@@ -68,7 +69,11 @@ class PlayerActivity : Activity() {
     private var lineMeasurements = emptyMap<Int, LineProbe.Result>()
     private val failedLines = mutableSetOf<Int>()
     private var episodeNo = 1
-    private var resumeAfterLifecycle = false
+    private var activityStarted = false
+    private var playRequested = true
+    private var loadedEpisodeUrl = ""
+    private var resumePositionMs: Long? = null
+    private var lastProgressSavedAt = 0L
     private var posterUrl = ""
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -84,7 +89,7 @@ class PlayerActivity : Activity() {
                 if (duration > 0) {
                     seekBar.progress = (current * 1000L / duration).toInt()
                     timeDisplay.text = "${formatTime(current)} / ${formatTime(duration)}"
-                    HMVideoApplication.instance.storageManager.updateProgress(detailUrl, epUrl, episodeNo, current / 1000L, duration / 1000L)
+                    saveProgress()
                 }
             }
             mainHandler.postDelayed(this, 1000)
@@ -218,7 +223,10 @@ class PlayerActivity : Activity() {
             return
         }
         readyHandledForSource = true
-        if (!initialSeekApplied) {
+        val savedPosition = resumePositionMs
+        if (savedPosition != null) {
+            player.seekTo(savedPosition)
+        } else if (!initialSeekApplied) {
             val hist = HMVideoApplication.instance.storageManager.getHistoryItem(detailUrl, epUrl)
             if (hist != null && hist.progressSec > 3) {
                 val resumeAt = hist.progressSec * 1000
@@ -227,8 +235,9 @@ class PlayerActivity : Activity() {
                 resumeToast.visibility = View.VISIBLE
                 mainHandler.postDelayed({ resumeToast.visibility = View.GONE }, 3500)
             }
-            initialSeekApplied = true
         }
+        resumePositionMs = null
+        initialSeekApplied = true
         syncPlaybackButton()
         if (overlay.visibility != View.VISIBLE) btnPlayPause.requestFocus()
         showOverlayWithTimeout()
@@ -275,7 +284,7 @@ class PlayerActivity : Activity() {
             showPlaybackMessage(
                 "暂时无法播放",
                 "已尝试可用播放方式，但视频服务未能开始播放。$issueHint 请检查网络，或返回详情页选择其他剧集。$diagnostic",
-                retryAction = { loadPlayInfo() }
+                retryAction = { loadPlayInfo(forceRefresh = true) }
             )
         }
     }
@@ -323,6 +332,14 @@ class PlayerActivity : Activity() {
     }
 
     private fun loadPlayInfo(forceRefresh: Boolean) {
+        if (loadedEpisodeUrl == epUrl) {
+            rememberPlaybackPosition()
+        } else {
+            loadedEpisodeUrl = epUrl
+            resumePositionMs = null
+            initialSeekApplied = false
+            playRequested = true
+        }
         val generation = ++loadGeneration
         lineProbe?.cancel()
         lineProbe = null
@@ -335,7 +352,6 @@ class PlayerActivity : Activity() {
         currentlyUsingProxy = false
         retryingCurrentLine = false
         playInfo = null
-        initialSeekApplied = false
         readyHandledForSource = false
         terminalPlaybackError = false
         exoPlayer?.stop()
@@ -464,6 +480,7 @@ class PlayerActivity : Activity() {
 
     private fun startStream(lineIndex: Int, useProxy: Boolean = false) {
         val line = playInfo?.lines?.getOrNull(lineIndex) ?: return
+        rememberPlaybackPosition()
         isVideoPrepared = false
         currentlyUsingProxy = useProxy
         showPlaybackMessage("正在连接【${line.name}】", "正在缓冲视频流，请稍候…")
@@ -479,9 +496,10 @@ class PlayerActivity : Activity() {
                 .setUri(Uri.parse(playbackUrl))
                 .apply { if (line.url.contains(".m3u8", ignoreCase = true)) setMimeType(MimeTypes.APPLICATION_M3U8) }
                 .build()
-            player.setMediaItem(mediaItem)
+            player.setMediaItem(mediaItem, resumePositionMs ?: 0L)
+            player.playbackParameters = PlaybackParameters(currentSpeed)
+            player.playWhenReady = activityStarted && playRequested
             player.prepare()
-            player.playWhenReady = true
         } catch (error: Exception) {
             handleStreamFailure(error as? androidx.media3.common.PlaybackException
                 ?: androidx.media3.common.PlaybackException("无法打开播放线路", error, 1001))
@@ -494,13 +512,37 @@ class PlayerActivity : Activity() {
             Toast.makeText(this, "请先选择重试或返回详情页", Toast.LENGTH_SHORT).show()
         } else if (!isVideoPrepared) {
             Toast.makeText(this, "视频正在连接，请稍候", Toast.LENGTH_SHORT).show()
-        } else if (player.isPlaying) {
-            player.pause()
+        } else if (player.playWhenReady) {
+            requestPlayback(false)
             syncPlaybackButton()
         } else {
-            player.play()
+            requestPlayback(true)
             syncPlaybackButton()
         }
+    }
+
+    private fun requestPlayback(play: Boolean) {
+        playRequested = play
+        exoPlayer?.playWhenReady = activityStarted && play
+        if (!play) saveProgress(force = true)
+    }
+
+    /** Keep the last usable position even if the replacement source fails before READY. */
+    private fun rememberPlaybackPosition() {
+        if (!readyHandledForSource) return
+        resumePositionMs = exoPlayer?.currentPosition?.coerceAtLeast(0L)
+        saveProgress(force = true)
+    }
+
+    private fun saveProgress(force: Boolean = false) {
+        val player = exoPlayer ?: return
+        if (!readyHandledForSource || player.duration <= 0) return
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastProgressSavedAt < 15_000L) return
+        HMVideoApplication.instance.storageManager.updateProgress(
+            detailUrl, epUrl, episodeNo, player.currentPosition.coerceAtLeast(0L) / 1000L, player.duration / 1000L
+        )
+        lastProgressSavedAt = now
     }
 
     private fun seekBy(offset: Long) {
@@ -516,6 +558,7 @@ class PlayerActivity : Activity() {
     private fun playNextEpisodeIfAvailable() {
         val next = playInfo?.nextEpisodeUrl
         if (!next.isNullOrEmpty()) {
+            saveProgress(force = true)
             epUrl = next
             episodeNo = (playInfo?.episodeNo ?: episodeNo) + 1
             epTitle = "第 ${episodeNo} 集"
@@ -532,11 +575,11 @@ class PlayerActivity : Activity() {
     }
 
     override fun onDestroy() {
+        saveProgress(force = true)
         loadGeneration++
         lineProbe?.cancel()
         lineProbe = null
-        mainHandler.removeCallbacks(updateProgressRunnable)
-        mainHandler.removeCallbacks(hideOverlayRunnable)
+        mainHandler.removeCallbacksAndMessages(null)
         playerView.player = null
         exoPlayer?.release()
         exoPlayer = null
@@ -544,19 +587,17 @@ class PlayerActivity : Activity() {
     }
 
     override fun onStop() {
-        val player = exoPlayer
-        resumeAfterLifecycle = player?.isPlaying == true
-        if (resumeAfterLifecycle) player?.pause()
+        activityStarted = false
+        saveProgress(force = true)
+        exoPlayer?.pause()
         super.onStop()
     }
 
     override fun onStart() {
         super.onStart()
-        if (resumeAfterLifecycle) {
-            resumeAfterLifecycle = false
-            exoPlayer?.play()
-            syncPlaybackButton()
-        }
+        activityStarted = true
+        exoPlayer?.playWhenReady = playRequested
+        syncPlaybackButton()
     }
 
     private fun syncPlaybackButton() {
@@ -608,8 +649,8 @@ class PlayerActivity : Activity() {
                 seekBy(10000)
                 return true
             }
-            KeyEvent.KEYCODE_MEDIA_PLAY -> { if (isVideoPrepared) exoPlayer?.play(); syncPlaybackButton(); return true }
-            KeyEvent.KEYCODE_MEDIA_PAUSE -> { exoPlayer?.pause(); syncPlaybackButton(); return true }
+            KeyEvent.KEYCODE_MEDIA_PLAY -> { if (isVideoPrepared) requestPlayback(true); syncPlaybackButton(); return true }
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> { requestPlayback(false); syncPlaybackButton(); return true }
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlayback(); return true }
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_MENU -> {
                 if (overlay.visibility != View.VISIBLE) {
