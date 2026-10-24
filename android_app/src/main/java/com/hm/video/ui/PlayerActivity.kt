@@ -31,6 +31,7 @@ import com.hm.video.data.model.PlayInfo
 import com.hm.video.data.model.PlayLine
 import com.hm.video.player.HlsLocalProxy
 import com.hm.video.player.LineProbe
+import com.hm.video.util.lineLabels
 
 @UnstableApi
 class PlayerActivity : Activity() {
@@ -453,10 +454,12 @@ class PlayerActivity : Activity() {
         val linesRow = findViewById<LinearLayout>(R.id.player_lines_row)
         linesRow.removeAllViews()
         val density = resources.displayMetrics.density
+        val labels = lineLabels(info.lines)
         for ((idx, line) in info.lines.withIndex()) {
+            val label = labels.getOrElse(idx) { line.name }
             val btn = Button(this).apply {
-                text = lineMeasurements[idx]?.let { "${line.name} · ${it.elapsedMs}ms" } ?: line.name
-                contentDescription = "${line.name}${if (idx == currentLineIndex) "，当前线路" else ""}，按确认切换"
+                text = lineMeasurements[idx]?.let { "$label · ${it.elapsedMs}ms" } ?: label
+                contentDescription = "$label（${line.name}）${if (idx == currentLineIndex) "，当前线路" else ""}，按确认切换"
                 textSize = 14f
                 setBackgroundResource(if (idx == currentLineIndex) R.drawable.bg_pill_active else R.drawable.bg_pill)
                 setTextColor(Color.WHITE)
