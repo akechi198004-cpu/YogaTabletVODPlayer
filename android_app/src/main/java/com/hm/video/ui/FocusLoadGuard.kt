@@ -29,6 +29,7 @@ internal class FocusLoadGuard {
             KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_DPAD_CENTER,
             KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_BUTTON_A,
             KeyEvent.KEYCODE_BACK,
             KeyEvent.KEYCODE_MENU
         )

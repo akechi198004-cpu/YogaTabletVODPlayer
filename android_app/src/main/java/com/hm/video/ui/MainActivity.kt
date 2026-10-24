@@ -23,7 +23,7 @@ import com.hm.video.data.model.*
 import com.hm.video.util.ImageLoader
 import com.hm.video.util.LoadingViewHelper
 
-class MainActivity : Activity() {
+class MainActivity : FocusAwareActivity() {
 
     enum class NavTab {
         HOME, CATEGORY, TOP, DAILY, MINE
@@ -68,7 +68,6 @@ class MainActivity : Activity() {
     private var mineRestorePending = false
     private var categoryReturnUrl: String? = null
     private var categoryReturnScroll = 0
-    private val focusLoadGuard = FocusLoadGuard()
 
     private data class PosterGrid(val cards: List<View>) {
         val first: View? get() = cards.firstOrNull()
@@ -168,11 +167,6 @@ class MainActivity : Activity() {
         val isTelevision = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
         val hasNoTouch = !packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
         return isTelevision || hasNoTouch
-    }
-
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        focusLoadGuard.onKeyEvent(event)
-        return super.dispatchKeyEvent(event)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -417,7 +411,7 @@ class MainActivity : Activity() {
     private fun renderCategoryTab(focusFirst: Boolean = false) {
         val requestId = ++renderGeneration
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
-        val focusToken = focusLoadGuard.begin()
+        val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取分类库作品…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -825,7 +819,7 @@ class MainActivity : Activity() {
                     contentFrame.removeAllViews()
                     contentFrame.addView(view)
                     view.post {
-                        if (focusLoadGuard.isCurrent(focusToken) && shouldApplyPendingFocus(btnCategory.id, focusBeforeId)) {
+                        if (isFocusLoadCurrent(focusToken) && shouldApplyPendingFocus(btnCategory.id, focusBeforeId)) {
                             val first = grid?.first
                             if (focusFirst && first != null) {
                                 first.requestFocus()
@@ -856,7 +850,7 @@ class MainActivity : Activity() {
     private fun renderTopTab() {
         val requestId = ++renderGeneration
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
-        val focusToken = focusLoadGuard.begin()
+        val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取全网影视榜单…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -940,7 +934,7 @@ class MainActivity : Activity() {
                     activePeriod?.let { target ->
                         btnTop.nextFocusDownId = target.id
                         view.post {
-                            if (focusLoadGuard.isCurrent(focusToken) && shouldApplyPendingFocus(btnTop.id, focusBeforeId)) target.requestFocus()
+                            if (isFocusLoadCurrent(focusToken) && shouldApplyPendingFocus(btnTop.id, focusBeforeId)) target.requestFocus()
                         }
                     }
                 }
@@ -953,7 +947,7 @@ class MainActivity : Activity() {
     private fun renderDailyTab() {
         val requestId = ++renderGeneration
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
-        val focusToken = focusLoadGuard.begin()
+        val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取今日实时连载更新…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -1020,7 +1014,7 @@ class MainActivity : Activity() {
                     firstCard?.let { target ->
                         btnDaily.nextFocusDownId = target.id
                         view.post {
-                            if (focusLoadGuard.isCurrent(focusToken) && shouldApplyPendingFocus(btnDaily.id, focusBeforeId)) target.requestFocus()
+                            if (isFocusLoadCurrent(focusToken) && shouldApplyPendingFocus(btnDaily.id, focusBeforeId)) target.requestFocus()
                         }
                     }
                 }
