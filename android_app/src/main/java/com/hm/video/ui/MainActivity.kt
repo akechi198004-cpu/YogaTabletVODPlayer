@@ -68,7 +68,7 @@ class MainActivity : Activity() {
     private var mineRestorePending = false
     private var categoryReturnUrl: String? = null
     private var categoryReturnScroll = 0
-    private var navigationToken = 0
+    private val focusLoadGuard = FocusLoadGuard()
 
     private data class PosterGrid(val cards: List<View>) {
         val first: View? get() = cards.firstOrNull()
@@ -170,15 +170,12 @@ class MainActivity : Activity() {
         return isTelevision || hasNoTouch
     }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        focusLoadGuard.onKeyEvent(event)
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (event?.action == KeyEvent.ACTION_DOWN && keyCode in intArrayOf(
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
-                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
-                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
-                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_MENU
-            )) {
-            navigationToken++
-        }
         when (keyCode) {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BUTTON_A -> {
                 val currentFocus = currentFocus
@@ -420,7 +417,7 @@ class MainActivity : Activity() {
     private fun renderCategoryTab(focusFirst: Boolean = false) {
         val requestId = ++renderGeneration
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
-        val focusToken = navigationToken
+        val focusToken = focusLoadGuard.begin()
         val root = createLoadingLayout("正在获取分类库作品…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -828,7 +825,7 @@ class MainActivity : Activity() {
                     contentFrame.removeAllViews()
                     contentFrame.addView(view)
                     view.post {
-                        if (navigationToken == focusToken && shouldApplyPendingFocus(btnCategory.id, focusBeforeId)) {
+                        if (focusLoadGuard.isCurrent(focusToken) && shouldApplyPendingFocus(btnCategory.id, focusBeforeId)) {
                             val first = grid?.first
                             if (focusFirst && first != null) {
                                 first.requestFocus()
@@ -859,7 +856,7 @@ class MainActivity : Activity() {
     private fun renderTopTab() {
         val requestId = ++renderGeneration
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
-        val focusToken = navigationToken
+        val focusToken = focusLoadGuard.begin()
         val root = createLoadingLayout("正在获取全网影视榜单…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -943,7 +940,7 @@ class MainActivity : Activity() {
                     activePeriod?.let { target ->
                         btnTop.nextFocusDownId = target.id
                         view.post {
-                            if (navigationToken == focusToken && shouldApplyPendingFocus(btnTop.id, focusBeforeId)) target.requestFocus()
+                            if (focusLoadGuard.isCurrent(focusToken) && shouldApplyPendingFocus(btnTop.id, focusBeforeId)) target.requestFocus()
                         }
                     }
                 }
@@ -956,7 +953,7 @@ class MainActivity : Activity() {
     private fun renderDailyTab() {
         val requestId = ++renderGeneration
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
-        val focusToken = navigationToken
+        val focusToken = focusLoadGuard.begin()
         val root = createLoadingLayout("正在获取今日实时连载更新…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -1023,7 +1020,7 @@ class MainActivity : Activity() {
                     firstCard?.let { target ->
                         btnDaily.nextFocusDownId = target.id
                         view.post {
-                            if (navigationToken == focusToken && shouldApplyPendingFocus(btnDaily.id, focusBeforeId)) target.requestFocus()
+                            if (focusLoadGuard.isCurrent(focusToken) && shouldApplyPendingFocus(btnDaily.id, focusBeforeId)) target.requestFocus()
                         }
                     }
                 }
