@@ -8,7 +8,8 @@
 
 - **电视 APK 实现**：`android_app/src/main/`；Gradle应用模块为 `android_app/app/`，通过 sourceSets 引用上述源码。
 - **网页工程**：`src/` 下的 React/Vite 工程，是独立界面与开发预览，不等于电视正在运行的代码。网页中的 Kotlin 展示数据也不是 APK 的编译来源。
-- **电视桌面启动器**：工作区 `upstream/launcher/`，属于另一应用；HM影视当前布局参考其 CalmHome 深色风格。
+- **电视桌面启动器**：工作区 `tv-desktop/launcher/`（原 `upstream/launcher/`），属于另一应用；HM影视当前布局参考其 CalmHome 深色风格。
+- **目录整理迁入的历史 HM 产物**：`import-2026-10-24/from-letv-x43/`，来自原混合目录，保持原字节且由现有忽略规则留在本机，不表示当前构建或部署；迁移交接见工作区 `reports/PROJECT_SEPARATION_20261024_CN.md`。
 - **旧 APK、设备截图、导入备份**：仅是历史产物或个人数据；文件名及时间不能证明已部署当前源码。
 
 ## 当前主要功能
