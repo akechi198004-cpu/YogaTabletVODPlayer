@@ -12,6 +12,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.net.HttpURLConnection
+import java.net.Socket
 import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.CountDownLatch
@@ -163,11 +164,85 @@ class PhoneInputServerTest {
         assertTrue(failed)
     }
 
-    private fun start(ttl: Long = 60_000): PhoneInputServer {
+    @Test
+    fun jsonResponsesLetThePageKeepInputAndRetry() {
+        val server = start()
+        val session = server.start()
+        servers.add(server)
+
+        val empty = post(session, "keyword=", json = true)
+        assertEquals(400, empty.first)
+        assertTrue(empty.second.contains("\"ok\":false"))
+        assertTrue(empty.second.contains("\"retryable\":true"))
+
+        val ok = post(session, "keyword=" + URLEncoder.encode("三体", "UTF-8"), json = true)
+        assertEquals(200, ok.first)
+        assertTrue(ok.second.contains("\"ok\":true"))
+        awaitReceived(1)
+        assertEquals(listOf("三体"), received)
+    }
+
+    @Test
+    fun abortsPartiallyReceivedRequestWhenSessionStops() {
+        val server = start(ttl = 60_000, requestTimeout = 30_000)
+        val session = server.start()
+        servers.add(server)
+
+        Socket("127.0.0.1", session.port).use { raw ->
+            raw.soTimeout = 3000
+            val output = raw.getOutputStream()
+            output.write(
+                ("POST /${session.code} HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1:${session.port}\r\n" +
+                    "Content-Type: application/x-www-form-urlencoded\r\n" +
+                    "Content-Length: 100\r\n\r\n" +
+                    "keyword=partial").toByteArray(Charsets.US_ASCII)
+            )
+            output.flush()
+            Thread.sleep(150)
+
+            server.stop()
+
+            val closed = try {
+                raw.getInputStream().read() == -1
+            } catch (_: Exception) {
+                true
+            }
+            assertTrue("connection should be closed after stop", closed)
+        }
+        Thread.sleep(100)
+        awaitReceived(0)
+        assertTrue(received.isEmpty())
+    }
+
+    @Test
+    fun silentClientHitsTheRequestDeadline() {
+        val server = start(requestTimeout = 300)
+        val session = server.start()
+        servers.add(server)
+
+        Socket("127.0.0.1", session.port).use { raw ->
+            raw.soTimeout = 4000
+            val started = System.currentTimeMillis()
+            val response = try {
+                raw.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } catch (_: Exception) {
+                ""
+            }
+            val elapsed = System.currentTimeMillis() - started
+            assertTrue("server should close an idle request", elapsed < 3000)
+            assertTrue("expected 408, got: ${response.take(40)}", response.contains("408"))
+        }
+        awaitReceived(0)
+        assertTrue(received.isEmpty())
+    }
+
+    private fun start(ttl: Long = 60_000, requestTimeout: Long = 8_000): PhoneInputServer {
         lateinit var server: PhoneInputServer
         server = PhoneInputServer(
             ports = intArrayOf(0),
             sessionTtlMs = ttl,
+            requestTimeoutMs = requestTimeout,
             mainHandler = Handler(Looper.getMainLooper()),
             hostOverride = "127.0.0.1",
             allowedHosts = setOf("127.0.0.1"),
@@ -196,7 +271,8 @@ class PhoneInputServerTest {
     private fun post(
         session: PhoneInputServer.Session,
         body: String,
-        extraHeaders: Map<String, String> = emptyMap()
+        extraHeaders: Map<String, String> = emptyMap(),
+        json: Boolean = false
     ): Pair<Int, String> {
         val connection = URL(session.url).openConnection() as HttpURLConnection
         return try {
@@ -206,9 +282,11 @@ class PhoneInputServerTest {
             connection.readTimeout = 3000
             connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
             connection.setRequestProperty("Origin", "http://127.0.0.1:${session.port}")
+            if (json) connection.setRequestProperty("Accept", "application/json")
             extraHeaders.forEach { (key, value) -> connection.setRequestProperty(key, value) }
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = connection.responseCode
+            assertTrue(connection.getHeaderField("Access-Control-Allow-Origin") == null)
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             code to (stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
         } finally {

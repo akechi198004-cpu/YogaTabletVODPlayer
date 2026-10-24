@@ -10,9 +10,11 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URLDecoder
 import java.security.SecureRandom
+import java.util.Collections
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -23,10 +25,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * It deliberately has no relation to HlsLocalProxy: it binds a separate short-lived port and
  * accepts only one GET page and one POST submission for the current session.
+ *
+ * Delivery rules:
+ * - A submission is committed exactly once, under the same lock used to stop the session, so a
+ *   request that is still being received when the dialog closes can never reach the TV.
+ * - Once committed, the keyword is handed to the TV even if the phone's confirmation write fails;
+ *   the phone then reports "unknown" instead of a false success and cannot resubmit, because the
+ *   session is retired.
  */
 class PhoneInputServer(
     private val ports: IntArray = intArrayOf(8899, 8787, 9090),
     private val sessionTtlMs: Long = 5 * 60 * 1000L,
+    private val requestTimeoutMs: Long = 8 * 1000L,
     private val mainHandler: Handler,
     private val onKeyword: (String) -> Unit,
     private val onExpired: () -> Unit = {},
@@ -38,9 +48,10 @@ class PhoneInputServer(
 
     private val random = SecureRandom()
     private val accepted = AtomicBoolean(false)
+    private val clients: MutableSet<Socket> = Collections.synchronizedSet(mutableSetOf<Socket>())
     private val workers = ThreadPoolExecutor(
-        2, 2, 0L, TimeUnit.MILLISECONDS,
-        ArrayBlockingQueue<Runnable>(4),
+        4, 4, 0L, TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue<Runnable>(8),
         { runnable -> Thread(runnable, "hm-phone-input").apply { isDaemon = true } }
     )
 
@@ -52,9 +63,10 @@ class PhoneInputServer(
     @Volatile private var publicPort = 0
     @Volatile private var expiresAt = 0L
 
-    private val expiryRunnable = Runnable {
+    private val expiryRunnable: Runnable = Runnable {
         if (running && !accepted.get()) {
             expired = true
+            closeClients()
             onExpired()
         }
     }
@@ -86,9 +98,12 @@ class PhoneInputServer(
         return Session("http://$host:${socket.localPort}/$code", code, socket.localPort)
     }
 
+    /** Closes the listener and every open client connection, aborting partially received requests. */
     @Synchronized
     fun stop() {
-        retire()
+        running = false
+        closeListener()
+        closeClients()
         workers.shutdownNow()
     }
 
@@ -96,11 +111,26 @@ class PhoneInputServer(
     @Synchronized
     private fun retire() {
         running = false
+        closeListener()
+        workers.shutdown()
+    }
+
+    private fun closeListener() {
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
         mainHandler.removeCallbacks(expiryRunnable)
-        workers.shutdown()
     }
+
+    private fun closeClients() {
+        val snapshot = synchronized(clients) { clients.toList() }
+        for (client in snapshot) {
+            try { client.close() } catch (_: Exception) {}
+        }
+        clients.clear()
+    }
+
+    /** Session is usable only while the dialog is open, before expiry, and before the first commit. */
+    private fun isActive(): Boolean = running && !expired && clock() <= expiresAt
 
     private fun bind(candidates: IntArray): ServerSocket {
         var last: Exception? = null
@@ -121,11 +151,12 @@ class PhoneInputServer(
         try {
             while (running) {
                 val client = socket.accept()
-                client.soTimeout = 5000
+                client.soTimeout = requestTimeoutMs.toInt()
+                clients.add(client)
                 try {
                     workers.execute { handle(client) }
                 } catch (_: Exception) {
-                    sendStatus(client, 503, "Service Unavailable")
+                    clients.remove(client)
                     try { client.close() } catch (_: Exception) {}
                 }
             }
@@ -137,43 +168,60 @@ class PhoneInputServer(
     }
 
     private fun handle(socket: Socket) {
-        socket.use { client ->
-            try {
-                val input = BufferedInputStream(client.getInputStream())
-                val request = readRequest(input) ?: return sendStatus(client, 400, "Bad Request")
-                if (expired || clock() > expiresAt) {
-                    sendHtml(client, 410, "会话已过期", pageMessage("会话已过期，请回到电视重新打开“手机输入”。"))
-                    return
-                }
-                val pathCode = request.path.trim('/').lowercase()
-                if (pathCode != sessionCode || request.path.count { it == '/' } != 1) {
-                    return sendStatus(client, 404, "Not Found")
-                }
-                when (request.method) {
-                    "GET" -> {
-                        if (accepted.get()) {
-                            sendHtml(client, 409, "已提交", pageMessage("本次输入已提交，请回到电视查看。"))
-                        } else {
-                            sendHtml(client, 200, "手机输入", inputPage())
-                        }
+        val deadline = clock() + requestTimeoutMs
+        try {
+            socket.use { client ->
+                try {
+                    val input = BufferedInputStream(client.getInputStream())
+                    val request = readRequest(input, deadline)
+                        ?: return@use sendStatus(client, 400, "Bad Request")
+                    if (!isActive()) {
+                        return@use fail(client, request, 410, "会话已过期，请回到电视重新打开“手机输入”。", retryable = false)
                     }
-                    "POST" -> submit(client, request)
-                    else -> sendStatus(client, 405, "Method Not Allowed")
+                    val pathCode = request.path.trim('/').lowercase()
+                    if (pathCode != sessionCode || request.path.count { it == '/' } != 1) {
+                        return@use sendStatus(client, 404, "Not Found")
+                    }
+                    when (request.method) {
+                        "GET" -> {
+                            if (accepted.get()) {
+                                fail(client, request, 409, "本次输入已提交，请回到电视查看。", retryable = false)
+                            } else {
+                                sendHtml(client, 200, inputPage())
+                            }
+                        }
+                        "POST" -> submit(client, request, deadline)
+                        else -> fail(client, request, 405, "不支持的请求方式，请刷新页面后重试。", retryable = true)
+                    }
+                } catch (_: SocketTimeoutException) {
+                    try { fail(client, Request("GET", "/", emptyMap(), "", ByteArray(0)), 408, "发送超时，请重试。", retryable = true) } catch (_: Exception) {}
+                } catch (_: Exception) {
+                    try { sendStatus(client, 400, "Bad Request") } catch (_: Exception) {}
                 }
-            } catch (_: Exception) {
-                try { sendStatus(client, 400, "Bad Request") } catch (_: Exception) {}
             }
+        } finally {
+            clients.remove(socket)
         }
     }
 
-    private fun submit(client: Socket, request: Request) {
-        if (!allowedSource(request.headers)) return sendStatus(client, 403, "Forbidden")
-        if (!request.contentType.startsWith("application/x-www-form-urlencoded", ignoreCase = true)) {
-            return sendStatus(client, 415, "Unsupported Media Type")
+    private fun submit(client: Socket, request: Request, deadline: Long) {
+        if (!allowedSource(request.headers)) {
+            return fail(client, request, 403, "来源校验失败，请从电视显示的地址重新打开页面。", retryable = false)
         }
-        val length = request.headers["content-length"]?.toIntOrNull() ?: return sendStatus(client, 411, "Length Required")
-        if (length <= 0) return sendHtml(client, 400, "输入无效", inputPage(error = "请输入搜索词。"))
-        if (length > MAX_BODY_BYTES) return sendHtml(client, 413, "请求过大", inputPage(error = "搜索词太长，请缩短后重试。"))
+        if (!request.contentType.startsWith("application/x-www-form-urlencoded", ignoreCase = true)) {
+            return fail(client, request, 415, "提交格式不正确，请刷新页面后重试。", retryable = true)
+        }
+        val length = request.headers["content-length"]?.toIntOrNull()
+            ?: return fail(client, request, 411, "提交内容为空，请重新输入。", retryable = true)
+        if (length <= 0) {
+            return fail(client, request, 400, "请输入搜索词。", retryable = true, formValue = "")
+        }
+        if (length > MAX_BODY_BYTES) {
+            return fail(client, request, 413, "搜索词太长，请缩短后重试。", retryable = true, formValue = "")
+        }
+        if (clock() > deadline) {
+            return fail(client, request, 408, "发送超时，请重试。", retryable = true)
+        }
 
         val body = request.body
         if (body.size != length) return sendStatus(client, 400, "Bad Request")
@@ -182,19 +230,34 @@ class PhoneInputServer(
             ?.trim()
             .orEmpty()
 
-        if (keyword.isEmpty()) return sendHtml(client, 400, "输入无效", inputPage(error = "请输入搜索词。"))
+        if (keyword.isEmpty()) {
+            return fail(client, request, 400, "请输入搜索词。", retryable = true, formValue = "")
+        }
         if (keyword.length > MAX_KEYWORD_CHARS || keyword.toByteArray(Charsets.UTF_8).size > MAX_KEYWORD_BYTES) {
-            return sendHtml(client, 413, "搜索词过长", inputPage(keyword, "搜索词太长，请缩短后重试。"))
+            return fail(client, request, 413, "搜索词太长，请缩短后重试。", retryable = true, formValue = keyword)
         }
         if (keyword.any { it < ' ' && it != '\n' && it != '\r' }) {
-            return sendHtml(client, 400, "输入无效", inputPage(error = "搜索词包含不支持的字符。"))
-        }
-        if (!accepted.compareAndSet(false, true)) {
-            return sendHtml(client, 409, "已提交", pageMessage("本次输入已提交，请回到电视查看。"))
+            return fail(client, request, 400, "搜索词包含不支持的字符。", retryable = true, formValue = keyword)
         }
 
-        // Flush the phone's confirmation before handing the keyword to the TV UI.
-        sendHtml(client, 200, "已发送", successPage())
+        // Atomic with stop(): a session closed mid-request can never commit a keyword.
+        val committed = synchronized(this) {
+            if (!isActive()) false else accepted.compareAndSet(false, true)
+        }
+        if (!committed) {
+            val expiredNow = !isActive()
+            return fail(
+                client,
+                request,
+                if (expiredNow) 410 else 409,
+                if (expiredNow) "会话已过期，请回到电视重新打开“手机输入”。" else "本次输入已提交，请回到电视查看。",
+                retryable = false
+            )
+        }
+
+        // Flush the phone's confirmation before handing the keyword to the TV UI. If the write
+        // fails the keyword is still delivered: the phone shows "unknown" and cannot resubmit.
+        sendSuccess(client, request)
         mainHandler.post { onKeyword(keyword) }
         retire()
     }
@@ -213,8 +276,38 @@ class PhoneInputServer(
         }
     }
 
-    private fun readRequest(input: BufferedInputStream): Request? {
-        val header = readHeader(input) ?: return null
+    private fun sendSuccess(socket: Socket, request: Request) {
+        if (wantsJson(request)) {
+            sendJson(socket, 200, "{\"ok\":true}")
+        } else {
+            sendHtml(socket, 200, successPage())
+        }
+    }
+
+    private fun fail(
+        socket: Socket,
+        request: Request,
+        code: Int,
+        message: String,
+        retryable: Boolean,
+        formValue: String? = null
+    ) {
+        if (wantsJson(request)) {
+            sendJson(socket, code, "{\"ok\":false,\"message\":\"$message\",\"retryable\":$retryable}")
+            return
+        }
+        if (formValue != null) {
+            sendHtml(socket, code, inputPage(formValue, message))
+        } else {
+            sendHtml(socket, code, pageMessage(message))
+        }
+    }
+
+    private fun wantsJson(request: Request): Boolean =
+        request.headers["accept"]?.contains("application/json", ignoreCase = true) == true
+
+    private fun readRequest(input: BufferedInputStream, deadline: Long): Request? {
+        val header = readHeader(input, deadline) ?: return null
         if (header.toByteArray(Charsets.ISO_8859_1).size > MAX_HEADER_BYTES) return null
         val lines = header.split("\r\n")
         val parts = lines.firstOrNull()?.split(' ') ?: return null
@@ -230,15 +323,16 @@ class PhoneInputServer(
         val body = if (method == "POST") {
             val length = headers["content-length"]?.toIntOrNull() ?: 0
             if (length < 0 || length > MAX_BODY_BYTES) return null
-            readBytes(input, length)
+            readBytes(input, length, deadline)
         } else ByteArray(0)
         return Request(method, path, headers, headers["content-type"].orEmpty(), body)
     }
 
-    private fun readHeader(input: BufferedInputStream): String? {
+    private fun readHeader(input: BufferedInputStream, deadline: Long): String? {
         val output = ByteArrayOutputStream()
         var matched = 0
         while (output.size() < MAX_HEADER_BYTES) {
+            checkDeadline(deadline)
             val value = input.read()
             if (value == -1) return null
             output.write(value)
@@ -254,15 +348,20 @@ class PhoneInputServer(
         return null
     }
 
-    private fun readBytes(input: BufferedInputStream, length: Int): ByteArray {
+    private fun readBytes(input: BufferedInputStream, length: Int, deadline: Long): ByteArray {
         val result = ByteArray(length)
         var offset = 0
         while (offset < length) {
+            checkDeadline(deadline)
             val count = input.read(result, offset, length - offset)
             if (count < 0) break
             offset += count
         }
         return if (offset == length) result else result.copyOf(offset)
+    }
+
+    private fun checkDeadline(deadline: Long) {
+        if (clock() > deadline) throw SocketTimeoutException("request deadline exceeded")
     }
 
     private fun formValue(body: String, name: String): String? {
@@ -290,35 +389,89 @@ class PhoneInputServer(
         } catch (_: Exception) {}
     }
 
-    private fun sendHtml(socket: Socket, code: Int, title: String, html: String) {
-        try {
-            val body = html.toByteArray(Charsets.UTF_8)
-            val output = BufferedOutputStream(socket.getOutputStream())
-            val header = "HTTP/1.1 $code $title\r\n" +
-                "Content-Type: text/html; charset=utf-8\r\n" +
-                "Content-Length: ${body.size}\r\n" +
-                "Cache-Control: no-store\r\n" +
-                "Referrer-Policy: no-referrer\r\n" +
+    private fun sendJson(socket: Socket, code: Int, json: String) {
+        send(
+            socket, code, "application/json; charset=utf-8", json,
+            "Referrer-Policy: no-referrer\r\n" +
                 "X-Content-Type-Options: nosniff\r\n" +
-                "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'\r\n" +
+                "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\n"
+        )
+    }
+
+    private fun sendHtml(socket: Socket, code: Int, html: String) {
+        send(
+            socket, code, "text/html; charset=utf-8", html,
+            "Referrer-Policy: no-referrer\r\n" +
+                "X-Content-Type-Options: nosniff\r\n" +
+                "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\n"
+        )
+    }
+
+    private fun send(socket: Socket, code: Int, contentType: String, body: String, extraHeaders: String) {
+        try {
+            val bytes = body.toByteArray(Charsets.UTF_8)
+            val output = BufferedOutputStream(socket.getOutputStream())
+            val header = "HTTP/1.1 $code ${statusTitle(code)}\r\n" +
+                "Content-Type: $contentType\r\n" +
+                "Content-Length: ${bytes.size}\r\n" +
+                "Cache-Control: no-store\r\n" +
+                extraHeaders +
                 "Connection: close\r\n\r\n"
             output.write(header.toByteArray(Charsets.US_ASCII))
-            output.write(body)
+            output.write(bytes)
             output.flush()
         } catch (_: Exception) {}
+    }
+
+    private fun statusTitle(code: Int): String = when (code) {
+        200 -> "OK"
+        400 -> "Bad Request"
+        403 -> "Forbidden"
+        405 -> "Method Not Allowed"
+        408 -> "Request Timeout"
+        409 -> "Conflict"
+        410 -> "Gone"
+        411 -> "Length Required"
+        413 -> "Payload Too Large"
+        415 -> "Unsupported Media Type"
+        else -> "Error"
     }
 
     private fun inputPage(value: String = "", error: String? = null): String = page(
         title = "手机输入",
         body = buildString {
             append("<p class=\"hint\">发送后，请在电视上查看搜索结果。</p>")
-            if (error != null) append("<p class=\"error\">").append(escapeHtml(error)).append("</p>")
-            append("<form method=\"post\" action=\"/").append(sessionCode).append("\" accept-charset=\"UTF-8\">")
-            append("<input name=\"keyword\" type=\"text\" maxlength=\"").append(MAX_KEYWORD_CHARS)
+            append("<form id=\"phone-form\" method=\"post\" action=\"/").append(sessionCode).append("\" accept-charset=\"UTF-8\">")
+            append("<input id=\"phone-keyword\" name=\"keyword\" type=\"text\" maxlength=\"").append(MAX_KEYWORD_CHARS)
                 .append("\" autocomplete=\"off\" autocapitalize=\"off\" value=\"")
                 .append(escapeHtml(value)).append("\" placeholder=\"片名或演员\">")
-            append("<button type=\"submit\">发送到电视</button></form>")
-            append("<script>document.querySelector('form').addEventListener('submit',function(){var b=document.querySelector('button');b.disabled=true;b.textContent='发送中…';});</script>")
+            append("<p id=\"phone-status\" class=\"status")
+            if (error != null) append(" error")
+            append("\" role=\"status\" aria-live=\"polite\">")
+            if (error != null) append(escapeHtml(error))
+            append("</p>")
+            append("<button id=\"phone-send\" type=\"submit\">发送到电视</button>")
+            append("<button id=\"phone-retry\" class=\"secondary\" type=\"button\" hidden>重试</button>")
+            append("</form>")
+            append(
+                "<script>(function(){var f=document.getElementById('phone-form'),i=document.getElementById('phone-keyword')," +
+                    "s=document.getElementById('phone-status'),b=document.getElementById('phone-send'),r=document.getElementById('phone-retry'),busy=false;" +
+                    "function setBusy(v){busy=v;b.disabled=v;b.textContent=v?'发送中…':'发送到电视';}" +
+                    "function show(m,c){s.textContent=m;s.className='status '+c;}" +
+                    "function succeed(){i.readOnly=true;b.hidden=true;r.hidden=true;setBusy(true);show('已发送到电视，请使用电视遥控器继续操作。','ok');}" +
+                    "function fail(m,retry){setBusy(false);r.hidden=!retry;show(m,'error');}" +
+                    "function send(){if(busy)return;var v=i.value;if(!v.trim()){show('请输入搜索词。','error');i.focus();return;}" +
+                    "r.hidden=true;setBusy(true);show('正在发送…','hint');" +
+                    "fetch(f.getAttribute('action'),{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8','Accept':'application/json'}," +
+                    "body:'keyword='+encodeURIComponent(v),cache:'no-store',credentials:'omit'}).then(function(res){return res.text().then(function(t){return {res:res,t:t};});})" +
+                    ".then(function(o){var d=null;try{d=JSON.parse(o.t);}catch(e){}" +
+                    "if(o.res.ok&&d&&d.ok){succeed();return;}" +
+                    "fail((d&&d.message)||('发送失败（'+o.res.status+'），请重试。'),d?d.retryable!==false:true);})" +
+                    ".catch(function(){fail('网络中断，无法确认是否已送达。请先查看电视是否已开始搜索；若没有，可点“重试”。',true);});}" +
+                    "f.addEventListener('submit',function(e){e.preventDefault();send();});" +
+                    "r.addEventListener('click',send);" +
+                    "i.addEventListener('input',function(){if(s.className.indexOf('error')>=0){s.textContent='';s.className='status';}});})();</script>"
+            )
         }
     )
 
@@ -339,10 +492,12 @@ class PhoneInputServer(
             "body{margin:0;background:#0d1118;color:#eaf1ff;font:16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}" +
             "main{max-width:420px;margin:0 auto;padding:32px 20px}" +
             "h1{font-size:22px;margin:0 0 12px}p{line-height:1.6}.hint{color:#b6c9e2}" +
-            ".error{color:#ff8a80}.ok{color:#9be7c4;font-size:18px;margin-top:24px}" +
+            ".status{min-height:24px;margin:0 0 12px;color:#b6c9e2}.status.error{color:#ff8a80}.status.ok{color:#9be7c4}" +
+            ".ok{color:#9be7c4;font-size:18px;margin-top:24px}" +
             "input{box-sizing:border-box;width:100%;height:52px;margin:18px 0 12px;padding:0 14px;border-radius:10px;border:1px solid #34435c;background:#141b26;color:#fff;font-size:18px}" +
             "button{width:100%;height:52px;border:0;border-radius:10px;background:#3b82f6;color:#fff;font-size:17px;font-weight:600}" +
-            "button:disabled{opacity:.6}" +
+            "button.secondary{margin-top:10px;background:transparent;border:1px solid #34435c;color:#b6c9e2}" +
+            "button:disabled{opacity:.6}[hidden]{display:none}" +
             "</style></head><body><main><h1>$title</h1>$body</main></body></html>"
 
     private fun escapeHtml(value: String): String = buildString(value.length) {
