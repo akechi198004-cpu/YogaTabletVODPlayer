@@ -1,6 +1,7 @@
 package com.hm.video.ui
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
@@ -12,6 +13,9 @@ import com.hm.video.R
 import com.hm.video.HMVideoApplication
 import com.hm.video.data.api.XingfanRepository
 import com.hm.video.data.model.WorkItem
+import com.hm.video.remoteinput.LanAddresses
+import com.hm.video.remoteinput.PhoneInputServer
+import com.hm.video.remoteinput.QrCode
 import com.hm.video.util.LoadingViewHelper
 
 class SearchActivity : Activity() {
@@ -29,16 +33,21 @@ class SearchActivity : Activity() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var searchInput: EditText
+    private lateinit var phoneInputButton: Button
     private lateinit var discoveryLayout: LinearLayout
     private lateinit var resultsContainer: LinearLayout
     private lateinit var hotTagsContainer: LinearLayout
     private lateinit var histTagsContainer: LinearLayout
+    private var phoneServer: PhoneInputServer? = null
+    private var phoneDialog: AlertDialog? = null
+    private var phoneSessionGeneration = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_search)
 
         searchInput = findViewById(R.id.search_edit_text)
+        phoneInputButton = findViewById(R.id.search_btn_phone_input)
         discoveryLayout = findViewById(R.id.search_discovery_layout)
         resultsContainer = findViewById(R.id.search_results_container)
         hotTagsContainer = findViewById(R.id.search_hot_tags_container)
@@ -49,6 +58,7 @@ class SearchActivity : Activity() {
         findViewById<Button>(R.id.search_btn_submit).setOnClickListener {
             performSearch(searchInput.text.toString().trim())
         }
+        phoneInputButton.setOnClickListener { openPhoneInputDialog() }
 
         findViewById<Button>(R.id.search_btn_clear_hist).setOnClickListener {
             HMVideoApplication.instance.storageManager.clearSearchHistory()
@@ -358,7 +368,99 @@ class SearchActivity : Activity() {
         resultsContainer.addView(row)
     }
 
+    private fun openPhoneInputDialog() {
+        if (phoneDialog?.isShowing == true) return
+        val addresses = LanAddresses.candidates()
+        if (addresses.isEmpty()) {
+            Toast.makeText(this, "未找到可用的局域网地址，请检查电视网络", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val generation = ++phoneSessionGeneration
+        val content = layoutInflater.inflate(R.layout.dialog_phone_input, null)
+        val qrView = content.findViewById<ImageView>(R.id.phone_input_qr)
+        val urlView = content.findViewById<TextView>(R.id.phone_input_url)
+        val alternativesView = content.findViewById<TextView>(R.id.phone_input_alternatives)
+        val statusView = content.findViewById<TextView>(R.id.phone_input_status)
+        val closeButton = content.findViewById<Button>(R.id.phone_input_close)
+        val dialog = AlertDialog.Builder(this).setView(content).create()
+        dialog.setCanceledOnTouchOutside(false)
+        var submitted = false
+        dialog.setOnDismissListener {
+            phoneSessionGeneration++
+            phoneServer?.stop()
+            phoneServer = null
+            phoneDialog = null
+            if (!isFinishing && !isDestroyed) {
+                val targetId = if (submitted) R.id.search_btn_submit else R.id.search_btn_phone_input
+                window.decorView.post { findViewById<Button>(targetId).requestFocus() }
+            }
+        }
+
+        val server = PhoneInputServer(
+            hostOverride = addresses.first().host,
+            allowedHosts = addresses.map { it.host }.toSet(),
+            mainHandler = mainHandler,
+            onKeyword = { keyword ->
+                if (generation == phoneSessionGeneration && !isFinishing && !isDestroyed) {
+                    submitted = true
+                    dialog.dismiss()
+                    searchInput.setText(keyword)
+                    performSearch(keyword)
+                }
+            },
+            onExpired = {
+                if (generation == phoneSessionGeneration && dialog.isShowing) {
+                    statusView.text = "会话已过期，请关闭后重新打开"
+                }
+            }
+        )
+
+        val session = try {
+            server.start()
+        } catch (error: Exception) {
+            server.stop()
+            Toast.makeText(this, "无法启动手机输入服务，请检查网络或稍后重试", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        phoneServer = server
+        phoneDialog = dialog
+        urlView.text = session.url
+        val qrBitmap = QrCode.bitmap(session.url, 480)
+        if (qrBitmap != null) {
+            qrView.setImageBitmap(qrBitmap)
+        } else {
+            qrView.visibility = View.GONE
+            statusView.text = "二维码生成失败，请手动输入地址"
+        }
+        if (addresses.size > 1) {
+            alternativesView.visibility = View.VISIBLE
+            alternativesView.text = "如无法访问，可尝试：\n" + addresses.drop(1).joinToString("\n") {
+                "http://${it.host}:${session.port}/${session.code}"
+            }
+        }
+        closeButton.setOnClickListener { dialog.dismiss() }
+        dialog.setOnShowListener { closeButton.post { closeButton.requestFocus() } }
+        dialog.show()
+    }
+
+    private fun dismissPhoneInput() {
+        phoneSessionGeneration++
+        phoneServer?.stop()
+        phoneServer = null
+        val dialog = phoneDialog
+        phoneDialog = null
+        if (dialog?.isShowing == true) dialog.dismiss()
+    }
+
+    override fun onStop() {
+        dismissPhoneInput()
+        super.onStop()
+    }
+
     override fun onDestroy() {
+        dismissPhoneInput()
         searchRequestId++
         super.onDestroy()
     }

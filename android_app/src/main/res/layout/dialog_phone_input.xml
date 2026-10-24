@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minWidth="420dp"
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:padding="24dp"
+    android:background="@drawable/bg_loading_card">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="用手机输入搜索词"
+        android:textColor="@color/text_white"
+        android:textSize="22sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center"
+        android:text="请将手机与电视连接同一局域网，扫码后输入片名或演员。"
+        android:textColor="@color/text_soft"
+        android:textSize="14sp" />
+
+    <ImageView
+        android:id="@+id/phone_input_qr"
+        android:layout_width="220dp"
+        android:layout_height="220dp"
+        android:layout_marginTop="16dp"
+        android:adjustViewBounds="true"
+        android:background="#FFFFFFFF"
+        android:contentDescription="手机输入二维码"
+        android:padding="8dp"
+        android:scaleType="fitCenter" />
+
+    <TextView
+        android:id="@+id/phone_input_url"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:fontFamily="monospace"
+        android:gravity="center"
+        android:textColor="@color/accent_cyan"
+        android:textIsSelectable="true"
+        android:textSize="15sp" />
+
+    <TextView
+        android:id="@+id/phone_input_alternatives"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:gravity="center"
+        android:textColor="@color/text_muted"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/phone_input_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:gravity="center"
+        android:text="等待手机提交"
+        android:textColor="@color/text_soft"
+        android:textSize="14sp" />
+
+    <Button
+        android:id="@+id/phone_input_close"
+        android:layout_width="wrap_content"
+        android:layout_height="44dp"
+        android:layout_marginTop="16dp"
+        android:background="@drawable/bg_pill"
+        android:paddingStart="28dp"
+        android:paddingEnd="28dp"
+        android:text="关闭"
+        android:textColor="@color/text_white"
+        android:textSize="15sp" />
+</LinearLayout>
