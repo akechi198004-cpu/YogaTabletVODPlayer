@@ -1025,7 +1025,7 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     // Tab 5: Favorites & Watch History
     // -------------------------------------------------------------
-    private fun renderMineTab(restoreFocus: Boolean = false) {
+    private fun renderMineTab(restoreFocus: Boolean = false, ensureFocusedVisible: Boolean = false) {
         val view = inflatePage()
         val filterScroll = view.findViewById<HorizontalScrollView>(R.id.page_filter_scroll)
         val filterContainer = view.findViewById<LinearLayout>(R.id.page_filter_container)
@@ -1042,13 +1042,21 @@ class MainActivity : FocusAwareActivity() {
                 .setTitle("删除观看记录")
                 .setMessage("确定删除「${item.title}」的观看记录？")
                 .setPositiveButton("删除") { _, _ ->
+                    val remaining = (cards.size - 1).coerceAtLeast(0)
+                    mineScrollY["history"] = itemsScroll?.scrollY ?: mineScrollY["history"] ?: 0
                     storage.removeHistory(item.url)
-                    mineFocusIndex["history"] = (index - 1).coerceAtLeast(0)
+                    mineFocusIndex["history"] = nextFocusIndexAfterDelete(index, remaining).coerceAtLeast(0)
                     mineFocusUrl.remove("history")
-                    renderMineTab(restoreFocus = true)
+                    renderMineTab(restoreFocus = true, ensureFocusedVisible = true)
                 }
                 .setNegativeButton("取消", null)
                 .show()
+        }
+
+        fun recordPosition(index: Int, url: String) {
+            mineFocusIndex[tabKey] = index
+            mineFocusUrl[tabKey] = url
+            itemsScroll?.post { mineScrollY[tabKey] = itemsScroll.scrollY }
         }
 
         fun addCard(workItem: WorkItem, onClick: (() -> Unit)? = null, deletable: Boolean = false) {
@@ -1060,13 +1068,14 @@ class MainActivity : FocusAwareActivity() {
             card.tag = workItem.url
             if (onClick != null) card.setOnClickListener { onClick() }
             card.setOnFocusChangeListener { _, hasFocus ->
-                if (hasFocus) {
-                    mineFocusIndex[tabKey] = cardIndex
-                    mineFocusUrl[tabKey] = workItem.url
-                    itemsScroll?.post { mineScrollY[tabKey] = itemsScroll.scrollY }
+                if (hasFocus) recordPosition(cardIndex, workItem.url)
+            }
+            card.findViewWithTag<View>("delete")?.let { delete ->
+                deleteButtons.add(delete)
+                delete.setOnFocusChangeListener { _, hasFocus ->
+                    if (hasFocus) recordPosition(cardIndex, workItem.url)
                 }
             }
-            card.findViewWithTag<View>("delete")?.let { deleteButtons.add(it) }
             cards.add(card)
             itemsContainer.addView(card)
         }
@@ -1238,7 +1247,16 @@ class MainActivity : FocusAwareActivity() {
             val scrollY = mineScrollY[tabKey] ?: 0
             view.post {
                 target.requestFocus()
-                itemsScroll?.scrollTo(0, scrollY)
+                if (ensureFocusedVisible) {
+                    target.post {
+                        target.requestRectangleOnScreen(
+                            android.graphics.Rect(0, 0, target.width, target.height),
+                            true
+                        )
+                    }
+                } else {
+                    itemsScroll?.scrollTo(0, scrollY)
+                }
             }
         } else {
             view.post { mineTab.requestFocus() }
@@ -1579,6 +1597,13 @@ class MainActivity : FocusAwareActivity() {
             }
 
             setOnClickListener { openDetail(item.url, item.title, item.poster, item.category, item.year) }
+        }
+    }
+
+    companion object {
+        internal fun nextFocusIndexAfterDelete(deletedIndex: Int, remainingCount: Int): Int {
+            if (remainingCount <= 0) return -1
+            return deletedIndex.coerceIn(0, remainingCount - 1)
         }
     }
 
