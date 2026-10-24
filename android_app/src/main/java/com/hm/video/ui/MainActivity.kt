@@ -1,6 +1,7 @@
 package com.hm.video.ui
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.UiModeManager
 import android.content.Context
 import android.content.Intent
@@ -1032,11 +1033,30 @@ class MainActivity : FocusAwareActivity() {
         val itemsContainer = view.findViewById<LinearLayout>(R.id.page_items_container)
         val itemsScroll = itemsContainer.parent as? ScrollView
         val cards = mutableListOf<View>()
+        val deleteButtons = mutableListOf<View>()
         val tabKey = currentMineSubTab
+        val storage = HMVideoApplication.instance.storageManager
 
-        fun addCard(workItem: WorkItem, onClick: (() -> Unit)? = null) {
+        fun confirmDelete(item: WorkItem, index: Int) {
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("删除观看记录")
+                .setMessage("确定删除「${item.title}」的观看记录？")
+                .setPositiveButton("删除") { _, _ ->
+                    storage.removeHistory(item.url)
+                    mineFocusIndex["history"] = (index - 1).coerceAtLeast(0)
+                    mineFocusUrl.remove("history")
+                    renderMineTab(restoreFocus = true)
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+
+        fun addCard(workItem: WorkItem, onClick: (() -> Unit)? = null, deletable: Boolean = false) {
             val cardIndex = cards.size
-            val card = createWorkCard(workItem)
+            val onDelete = if (deletable) {
+                { confirmDelete(workItem, cardIndex) }
+            } else null
+            val card = createWorkCard(workItem, onDelete)
             card.tag = workItem.url
             if (onClick != null) card.setOnClickListener { onClick() }
             card.setOnFocusChangeListener { _, hasFocus ->
@@ -1046,6 +1066,7 @@ class MainActivity : FocusAwareActivity() {
                     itemsScroll?.post { mineScrollY[tabKey] = itemsScroll.scrollY }
                 }
             }
+            card.findViewWithTag<View>("delete")?.let { deleteButtons.add(it) }
             cards.add(card)
             itemsContainer.addView(card)
         }
@@ -1054,7 +1075,6 @@ class MainActivity : FocusAwareActivity() {
         filterContainer.removeAllViews()
 
         val density = resources.displayMetrics.density
-        val storage = HMVideoApplication.instance.storageManager
         val favs = storage.getFavorites()
         val hist = storage.getHistory()
 
@@ -1144,8 +1164,10 @@ class MainActivity : FocusAwareActivity() {
                             poster = item.poster,
                             category = item.category,
                             progress = if (item.progressSec > 0) "上次播放至 ${item.progressSec / 60}分${item.progressSec % 60}秒" else "已观看"
-                        )
-                    ) { openHistory(item) }
+                        ),
+                        onClick = { openHistory(item) },
+                        deletable = true
+                    )
                 }
             }
         }
@@ -1193,6 +1215,17 @@ class MainActivity : FocusAwareActivity() {
         val mineTab = if (currentMineSubTab == "fav") btnFav else btnHist
         btnMine.nextFocusDownId = mineTab.id
         TvFocusNavigator.wireList(cards, upTarget = mineTab)
+        if (deleteButtons.size == cards.size) {
+            deleteButtons.forEachIndexed { index, delete ->
+                val card = cards[index]
+                card.nextFocusRightId = delete.id
+                delete.nextFocusLeftId = card.id
+                delete.nextFocusUpId = if (index == 0) mineTab.id else deleteButtons[index - 1].id
+                delete.nextFocusDownId =
+                    if (index == deleteButtons.lastIndex) delete.id else deleteButtons[index + 1].id
+                delete.nextFocusRightId = delete.id
+            }
+        }
         val firstCardId = cards.firstOrNull()?.id
         btnFav.nextFocusDownId = firstCardId ?: btnFav.id
         btnHist.nextFocusDownId = firstCardId ?: btnHist.id
@@ -1446,7 +1479,7 @@ class MainActivity : FocusAwareActivity() {
     }
 
     // 单行横版卡片渲染备用：包含海报图像 (ImageView + ImageLoader)
-    private fun createWorkCard(item: WorkItem): View {
+    private fun createWorkCard(item: WorkItem, onDelete: (() -> Unit)? = null): View {
         val density = resources.displayMetrics.density
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1521,6 +1554,29 @@ class MainActivity : FocusAwareActivity() {
                 }
             }
             addView(infoLayout)
+
+            if (onDelete != null) {
+                val deleteButton = Button(this@MainActivity).apply {
+                    id = View.generateViewId()
+                    tag = "delete"
+                    text = "删除"
+                    textSize = uiTextSize(12f)
+                    setTextColor(Color.parseColor("#ff8a80"))
+                    setBackgroundResource(R.drawable.bg_pill)
+                    contentDescription = "删除${item.title}的播放历史"
+                    isFocusable = true
+                    val horizontal = (16 * density).toInt()
+                    setPadding(horizontal, 0, horizontal, 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        (40 * density).toInt()
+                    ).apply {
+                        marginStart = (8 * density).toInt()
+                    }
+                    setOnClickListener { onDelete() }
+                }
+                addView(deleteButton)
+            }
 
             setOnClickListener { openDetail(item.url, item.title, item.poster, item.category, item.year) }
         }
