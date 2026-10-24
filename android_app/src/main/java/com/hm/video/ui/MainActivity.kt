@@ -68,6 +68,7 @@ class MainActivity : Activity() {
     private var mineRestorePending = false
     private var categoryReturnUrl: String? = null
     private var categoryReturnScroll = 0
+    private var navigationToken = 0
 
     private data class PosterGrid(val cards: List<View>) {
         val first: View? get() = cards.firstOrNull()
@@ -170,6 +171,14 @@ class MainActivity : Activity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (event?.action == KeyEvent.ACTION_DOWN && keyCode in intArrayOf(
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_MENU
+            )) {
+            navigationToken++
+        }
         when (keyCode) {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BUTTON_A -> {
                 val currentFocus = currentFocus
@@ -410,6 +419,8 @@ class MainActivity : Activity() {
     // -------------------------------------------------------------
     private fun renderCategoryTab(focusFirst: Boolean = false) {
         val requestId = ++renderGeneration
+        val focusBeforeId = currentFocus?.id ?: View.NO_ID
+        val focusToken = navigationToken
         val root = createLoadingLayout("正在获取分类库作品…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -817,15 +828,17 @@ class MainActivity : Activity() {
                     contentFrame.removeAllViews()
                     contentFrame.addView(view)
                     view.post {
-                        val first = grid?.first
-                        if (focusFirst && first != null) {
-                            first.requestFocus()
-                            (itemsContainer.parent as? ScrollView)?.scrollTo(0, 0)
-                        } else {
-                            val focusId = categoryFocusIds[lastCategoryFocusKey]
-                            val focusTarget = focusId?.let { view.findViewById<View>(it) }
-                                ?: mainTabsLayout.getChildAt(0)
-                            focusTarget?.requestFocus()
+                        if (navigationToken == focusToken && shouldApplyPendingFocus(btnCategory.id, focusBeforeId)) {
+                            val first = grid?.first
+                            if (focusFirst && first != null) {
+                                first.requestFocus()
+                                (itemsContainer.parent as? ScrollView)?.scrollTo(0, 0)
+                            } else {
+                                val focusId = categoryFocusIds[lastCategoryFocusKey]
+                                val focusTarget = focusId?.let { view.findViewById<View>(it) }
+                                    ?: mainTabsLayout.getChildAt(0)
+                                focusTarget?.requestFocus()
+                            }
                         }
                     }
                 }
@@ -845,6 +858,8 @@ class MainActivity : Activity() {
     // -------------------------------------------------------------
     private fun renderTopTab() {
         val requestId = ++renderGeneration
+        val focusBeforeId = currentFocus?.id ?: View.NO_ID
+        val focusToken = navigationToken
         val root = createLoadingLayout("正在获取全网影视榜单…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -927,7 +942,9 @@ class MainActivity : Activity() {
                     )
                     activePeriod?.let { target ->
                         btnTop.nextFocusDownId = target.id
-                        view.post { target.requestFocus() }
+                        view.post {
+                            if (navigationToken == focusToken && shouldApplyPendingFocus(btnTop.id, focusBeforeId)) target.requestFocus()
+                        }
                     }
                 }
         }.start()
@@ -938,6 +955,8 @@ class MainActivity : Activity() {
     // -------------------------------------------------------------
     private fun renderDailyTab() {
         val requestId = ++renderGeneration
+        val focusBeforeId = currentFocus?.id ?: View.NO_ID
+        val focusToken = navigationToken
         val root = createLoadingLayout("正在获取今日实时连载更新…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
@@ -1003,7 +1022,9 @@ class MainActivity : Activity() {
                     )
                     firstCard?.let { target ->
                         btnDaily.nextFocusDownId = target.id
-                        view.post { target.requestFocus() }
+                        view.post {
+                            if (navigationToken == focusToken && shouldApplyPendingFocus(btnDaily.id, focusBeforeId)) target.requestFocus()
+                        }
                     }
                 }
         }.start()
@@ -1023,12 +1044,13 @@ class MainActivity : Activity() {
         val tabKey = currentMineSubTab
 
         fun addCard(workItem: WorkItem, onClick: (() -> Unit)? = null) {
+            val cardIndex = cards.size
             val card = createWorkCard(workItem)
             card.tag = workItem.url
             if (onClick != null) card.setOnClickListener { onClick() }
             card.setOnFocusChangeListener { _, hasFocus ->
                 if (hasFocus) {
-                    mineFocusIndex[tabKey] = cards.size
+                    mineFocusIndex[tabKey] = cardIndex
                     mineFocusUrl[tabKey] = workItem.url
                     itemsScroll?.post { mineScrollY[tabKey] = itemsScroll.scrollY }
                 }
@@ -1173,13 +1195,19 @@ class MainActivity : Activity() {
         contentFrame.addView(view)
         btnFav.nextFocusRightId = btnHist.id
         btnHist.nextFocusLeftId = btnFav.id
+        btnFav.nextFocusLeftId = btnFav.id
+        btnHist.nextFocusRightId = btnHist.id
+        btnFav.nextFocusUpId = btnMine.id
+        btnHist.nextFocusUpId = btnMine.id
         val mineTab = if (currentMineSubTab == "fav") btnFav else btnHist
         btnMine.nextFocusDownId = mineTab.id
         TvFocusNavigator.wireList(cards, upTarget = mineTab)
-        mineTab.nextFocusDownId = cards.firstOrNull()?.id ?: mineTab.id
+        val firstCardId = cards.firstOrNull()?.id
+        btnFav.nextFocusDownId = firstCardId ?: btnFav.id
+        btnHist.nextFocusDownId = firstCardId ?: btnHist.id
 
         if (restoreFocus && cards.isNotEmpty()) {
-            val index = mineFocusIndex[tabKey] ?: 0
+            val index = (mineFocusIndex[tabKey] ?: 0).coerceIn(0, cards.lastIndex)
             val target = cards.firstOrNull { it.tag == mineFocusUrl[tabKey] }
                 ?: cards.getOrNull(index)
                 ?: cards.last()
@@ -1505,6 +1533,17 @@ class MainActivity : Activity() {
 
             setOnClickListener { openDetail(item.url, item.title, item.poster, item.category, item.year) }
         }
+    }
+
+    /**
+     * Only move focus into freshly loaded content if the user has not deliberately moved to
+     * another top-level control while the request was in flight.
+     */
+    private fun shouldApplyPendingFocus(sourceNavId: Int, focusBeforeId: Int): Boolean {
+        val current = currentFocus ?: return true
+        if (current.id == sourceNavId || current.id == focusBeforeId) return true
+        val topBarIds = intArrayOf(btnHome.id, btnCategory.id, btnTop.id, btnDaily.id, btnMine.id, R.id.btn_search)
+        return current.id !in topBarIds
     }
 
     private fun restoreCategoryFocus() {
