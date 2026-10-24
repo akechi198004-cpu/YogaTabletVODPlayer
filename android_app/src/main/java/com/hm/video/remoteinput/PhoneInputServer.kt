@@ -153,8 +153,9 @@ class PhoneInputServer(
                 val client = socket.accept()
                 client.soTimeout = requestTimeoutMs.toInt()
                 clients.add(client)
+                val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(requestTimeoutMs)
                 try {
-                    workers.execute { handle(client) }
+                    workers.execute { handle(client, deadline) }
                 } catch (_: Exception) {
                     clients.remove(client)
                     try { client.close() } catch (_: Exception) {}
@@ -167,20 +168,19 @@ class PhoneInputServer(
         }
     }
 
-    private fun handle(socket: Socket) {
-        val deadline = clock() + requestTimeoutMs
+    private fun handle(socket: Socket, deadline: Long) {
         try {
             socket.use { client ->
                 try {
                     val input = BufferedInputStream(client.getInputStream())
-                    val request = readRequest(input, deadline)
+                    val request = readRequest(input, client, deadline)
                         ?: return@use sendStatus(client, 400, "Bad Request")
                     if (!isActive()) {
                         return@use fail(client, request, 410, "会话已过期，请回到电视重新打开“手机输入”。", retryable = false)
                     }
                     val pathCode = request.path.trim('/').lowercase()
                     if (pathCode != sessionCode || request.path.count { it == '/' } != 1) {
-                        return@use sendStatus(client, 404, "Not Found")
+                        return@use fail(client, request, 404, "??????????????????????", retryable = false)
                     }
                     when (request.method) {
                         "GET" -> {
@@ -190,7 +190,7 @@ class PhoneInputServer(
                                 sendHtml(client, 200, inputPage())
                             }
                         }
-                        "POST" -> submit(client, request, deadline)
+                        "POST" -> submit(client, request)
                         else -> fail(client, request, 405, "不支持的请求方式，请刷新页面后重试。", retryable = true)
                     }
                 } catch (_: SocketTimeoutException) {
@@ -204,7 +204,7 @@ class PhoneInputServer(
         }
     }
 
-    private fun submit(client: Socket, request: Request, deadline: Long) {
+    private fun submit(client: Socket, request: Request) {
         if (!allowedSource(request.headers)) {
             return fail(client, request, 403, "来源校验失败，请从电视显示的地址重新打开页面。", retryable = false)
         }
@@ -218,9 +218,6 @@ class PhoneInputServer(
         }
         if (length > MAX_BODY_BYTES) {
             return fail(client, request, 413, "搜索词太长，请缩短后重试。", retryable = true, formValue = "")
-        }
-        if (clock() > deadline) {
-            return fail(client, request, 408, "发送超时，请重试。", retryable = true)
         }
 
         val body = request.body
@@ -306,8 +303,8 @@ class PhoneInputServer(
     private fun wantsJson(request: Request): Boolean =
         request.headers["accept"]?.contains("application/json", ignoreCase = true) == true
 
-    private fun readRequest(input: BufferedInputStream, deadline: Long): Request? {
-        val header = readHeader(input, deadline) ?: return null
+    private fun readRequest(input: BufferedInputStream, socket: Socket, deadline: Long): Request? {
+        val header = readHeader(input, socket, deadline) ?: return null
         if (header.toByteArray(Charsets.ISO_8859_1).size > MAX_HEADER_BYTES) return null
         val lines = header.split("\r\n")
         val parts = lines.firstOrNull()?.split(' ') ?: return null
@@ -323,16 +320,16 @@ class PhoneInputServer(
         val body = if (method == "POST") {
             val length = headers["content-length"]?.toIntOrNull() ?: 0
             if (length < 0 || length > MAX_BODY_BYTES) return null
-            readBytes(input, length, deadline)
+            readBytes(input, socket, length, deadline)
         } else ByteArray(0)
         return Request(method, path, headers, headers["content-type"].orEmpty(), body)
     }
 
-    private fun readHeader(input: BufferedInputStream, deadline: Long): String? {
+    private fun readHeader(input: BufferedInputStream, socket: Socket, deadline: Long): String? {
         val output = ByteArrayOutputStream()
         var matched = 0
         while (output.size() < MAX_HEADER_BYTES) {
-            checkDeadline(deadline)
+            armTimeout(socket, deadline)
             val value = input.read()
             if (value == -1) return null
             output.write(value)
@@ -348,11 +345,11 @@ class PhoneInputServer(
         return null
     }
 
-    private fun readBytes(input: BufferedInputStream, length: Int, deadline: Long): ByteArray {
+    private fun readBytes(input: BufferedInputStream, socket: Socket, length: Int, deadline: Long): ByteArray {
         val result = ByteArray(length)
         var offset = 0
         while (offset < length) {
-            checkDeadline(deadline)
+            armTimeout(socket, deadline)
             val count = input.read(result, offset, length - offset)
             if (count < 0) break
             offset += count
@@ -360,8 +357,15 @@ class PhoneInputServer(
         return if (offset == length) result else result.copyOf(offset)
     }
 
-    private fun checkDeadline(deadline: Long) {
-        if (clock() > deadline) throw SocketTimeoutException("request deadline exceeded")
+    /**
+     * Arms the socket so a single blocking read can never outlive the request deadline that was
+     * fixed when the connection was accepted. Remaining time also covers queueing time.
+     */
+    private fun armTimeout(socket: Socket, deadline: Long) {
+        val remainingNanos = deadline - System.nanoTime()
+        if (remainingNanos <= 0L) throw SocketTimeoutException("request deadline exceeded")
+        val remainingMs = TimeUnit.NANOSECONDS.toMillis(remainingNanos).coerceAtLeast(1L)
+        socket.soTimeout = remainingMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 
     private fun formValue(body: String, name: String): String? {
@@ -454,23 +458,7 @@ class PhoneInputServer(
             append("<button id=\"phone-retry\" class=\"secondary\" type=\"button\" hidden>重试</button>")
             append("</form>")
             append(
-                "<script>(function(){var f=document.getElementById('phone-form'),i=document.getElementById('phone-keyword')," +
-                    "s=document.getElementById('phone-status'),b=document.getElementById('phone-send'),r=document.getElementById('phone-retry'),busy=false;" +
-                    "function setBusy(v){busy=v;b.disabled=v;b.textContent=v?'发送中…':'发送到电视';}" +
-                    "function show(m,c){s.textContent=m;s.className='status '+c;}" +
-                    "function succeed(){i.readOnly=true;b.hidden=true;r.hidden=true;setBusy(true);show('已发送到电视，请使用电视遥控器继续操作。','ok');}" +
-                    "function fail(m,retry){setBusy(false);r.hidden=!retry;show(m,'error');}" +
-                    "function send(){if(busy)return;var v=i.value;if(!v.trim()){show('请输入搜索词。','error');i.focus();return;}" +
-                    "r.hidden=true;setBusy(true);show('正在发送…','hint');" +
-                    "fetch(f.getAttribute('action'),{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8','Accept':'application/json'}," +
-                    "body:'keyword='+encodeURIComponent(v),cache:'no-store',credentials:'omit'}).then(function(res){return res.text().then(function(t){return {res:res,t:t};});})" +
-                    ".then(function(o){var d=null;try{d=JSON.parse(o.t);}catch(e){}" +
-                    "if(o.res.ok&&d&&d.ok){succeed();return;}" +
-                    "fail((d&&d.message)||('发送失败（'+o.res.status+'），请重试。'),d?d.retryable!==false:true);})" +
-                    ".catch(function(){fail('网络中断，无法确认是否已送达。请先查看电视是否已开始搜索；若没有，可点“重试”。',true);});}" +
-                    "f.addEventListener('submit',function(e){e.preventDefault();send();});" +
-                    "r.addEventListener('click',send);" +
-                    "i.addEventListener('input',function(){if(s.className.indexOf('error')>=0){s.textContent='';s.className='status';}});})();</script>"
+                "<script>(function(){var f=document.getElementById('phone-form'),i=document.getElementById('phone-keyword'),s=document.getElementById('phone-status'),b=document.getElementById('phone-send'),r=document.getElementById('phone-retry'),busy=false,seq=0;function show(m,c){s.textContent=m;s.className='status '+c;}function succeed(){busy=true;b.disabled=true;b.hidden=true;r.hidden=true;i.readOnly=true;show('????????????????????','ok');}function fail(m,retry){busy=!retry;b.disabled=!retry;b.hidden=!retry;b.textContent='?????';r.hidden=!retry;show(m,'error');}function send(){if(busy)return;var v=i.value;if(!v.trim()){show('???????','error');i.focus();return;}var id=++seq,settled=false,controller=null;try{controller=new AbortController();}catch(e){controller=null;}var timer=setTimeout(function(){if(settled||id!==seq)return;settled=true;if(controller){try{controller.abort();}catch(e){}}fail('????????????????????????????????????????',true);},12000);busy=true;b.disabled=true;b.textContent='????';r.hidden=true;show('?????','hint');var opts={method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8','Accept':'application/json'},body:'keyword='+encodeURIComponent(v),cache:'no-store',credentials:'omit'};if(controller)opts.signal=controller.signal;function finish(fn){if(settled||id!==seq)return;settled=true;clearTimeout(timer);fn();}fetch(f.getAttribute('action'),opts).then(function(res){return res.text().then(function(t){return {res:res,t:t};});}).then(function(o){finish(function(){var d=null;try{d=JSON.parse(o.t);}catch(e){}if(o.res.ok&&d&&d.ok){succeed();return;}var terminal=!d&&(o.res.status===404||o.res.status===409||o.res.status===410);var m=(d&&d.message)||(terminal?'??????????????????????':('?????'+o.res.status+'??????'));fail(m,d?d.retryable!==false:!terminal);});}).catch(function(){finish(function(){fail('????????????????????????????????????????',true);});});}f.addEventListener('submit',function(e){e.preventDefault();send();});r.addEventListener('click',send);i.addEventListener('input',function(){if(s.className.indexOf('error')>=0){s.textContent='';s.className='status';}});})();</script>"
             )
         }
     )

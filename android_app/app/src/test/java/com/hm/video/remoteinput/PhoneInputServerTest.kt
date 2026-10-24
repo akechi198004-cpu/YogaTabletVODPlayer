@@ -237,6 +237,60 @@ class PhoneInputServerTest {
         assertTrue(received.isEmpty())
     }
 
+    @Test
+    fun partialBytesNearDeadlineCannotExtendIt() {
+        val server = start(requestTimeout = 1_000)
+        val session = server.start()
+        servers.add(server)
+
+        Socket("127.0.0.1", session.port).use { raw ->
+            raw.soTimeout = 5000
+            val output = raw.getOutputStream()
+            output.write("GET /${session.code} HTTP/1.1\r\nHost: 127.0.0.1\r\n".toByteArray(Charsets.US_ASCII))
+            output.flush()
+            Thread.sleep(700)
+            output.write("X-Slow: ".toByteArray(Charsets.US_ASCII))
+            output.flush()
+
+            val started = System.currentTimeMillis()
+            try {
+                raw.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } catch (_: Exception) {
+            }
+            val elapsed = System.currentTimeMillis() - started
+            assertTrue("read outlived the request deadline by ${elapsed}ms", elapsed < 600)
+        }
+        Thread.sleep(100)
+        assertTrue(received.isEmpty())
+    }
+
+    @Test
+    fun queuedRequestKeepsItsAcceptDeadline() {
+        val server = start(requestTimeout = 800)
+        val session = server.start()
+        servers.add(server)
+
+        val busy = (1..4).map {
+            Socket("127.0.0.1", session.port).apply { soTimeout = 5000 }
+        }
+        try {
+            Thread.sleep(150)
+            Socket("127.0.0.1", session.port).use { queued ->
+                queued.soTimeout = 5000
+                val started = System.currentTimeMillis()
+                try {
+                    queued.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() }
+                } catch (_: Exception) {
+                }
+                val elapsed = System.currentTimeMillis() - started
+                assertTrue("queued request got a fresh deadline, took ${elapsed}ms", elapsed < 1400)
+            }
+        } finally {
+            busy.forEach { try { it.close() } catch (_: Exception) {} }
+        }
+        assertTrue(received.isEmpty())
+    }
+
     private fun start(ttl: Long = 60_000, requestTimeout: Long = 8_000): PhoneInputServer {
         lateinit var server: PhoneInputServer
         server = PhoneInputServer(
