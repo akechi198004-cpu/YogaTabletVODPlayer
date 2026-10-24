@@ -13,6 +13,7 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.*
 import com.hm.video.HMVideoApplication
 import com.hm.video.R
@@ -61,6 +62,16 @@ class MainActivity : Activity() {
 
     // Mine tab state
     private var currentMineSubTab = "fav" // "fav" or "history"
+    private val mineFocusIndex = mutableMapOf("fav" to 0, "history" to 0)
+    private val mineFocusUrl = mutableMapOf<String, String>()
+    private val mineScrollY = mutableMapOf("fav" to 0, "history" to 0)
+    private var mineRestorePending = false
+    private var categoryReturnUrl: String? = null
+    private var categoryReturnScroll = 0
+
+    private data class PosterGrid(val cards: List<View>) {
+        val first: View? get() = cards.firstOrNull()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -139,8 +150,11 @@ class MainActivity : Activity() {
         super.onResume()
         heroCarousel?.setActive(true)
         if (currentTab == NavTab.MINE) {
-            renderMineTab()
+            val restore = mineRestorePending
+            mineRestorePending = false
+            renderMineTab(restoreFocus = restore)
         }
+        if (currentTab == NavTab.CATEGORY) restoreCategoryFocus()
     }
 
     override fun onPause() {
@@ -181,6 +195,7 @@ class MainActivity : Activity() {
         heroCarousel?.setActive(false)
         heroCarousel = null
         currentTab = tab
+        if (tab != NavTab.CATEGORY) categoryReturnUrl = null
         val tabs = listOf(
             btnHome to NavTab.HOME,
             btnCategory to NavTab.CATEGORY,
@@ -291,7 +306,12 @@ class MainActivity : Activity() {
                 container.addView(headingRow)
 
                 // Recent Works Poster Grid
-                renderPosterGrid(container, data.recent, listColumns)
+                val homeGrid = renderPosterGrid(container, data.recent, listColumns)
+                TvFocusNavigator.wireGrid(
+                    homeGrid?.cards.orEmpty(),
+                    listColumns,
+                    upTarget = heroCarousel ?: btnHome
+                )
 
                 contentFrame.removeAllViews()
                 contentFrame.addView(view)
@@ -388,7 +408,7 @@ class MainActivity : Activity() {
     // -------------------------------------------------------------
     // Tab 2: Category (包含电影、电视剧、动漫、综艺全分类)
     // -------------------------------------------------------------
-    private fun renderCategoryTab() {
+    private fun renderCategoryTab(focusFirst: Boolean = false) {
         val requestId = ++renderGeneration
         val root = createLoadingLayout("正在获取分类库作品…")
         contentFrame.removeAllViews()
@@ -726,7 +746,7 @@ class MainActivity : Activity() {
                     itemsContainer.addView(headerRow)
 
                     // Works Poster Grid
-                    if (data.items.isEmpty()) {
+                    val grid = if (data.items.isEmpty()) {
                         itemsContainer.addView(TextView(this).apply {
                             text = "没有符合当前条件的影片，请更换条件或重置筛选"
                             setTextColor(Color.parseColor("#b8c2d1"))
@@ -734,6 +754,7 @@ class MainActivity : Activity() {
                             gravity = Gravity.CENTER
                             setPadding(12, 40, 12, 40)
                         })
+                        null
                     } else renderPosterGrid(itemsContainer, data.items, listColumns)
 
                     // Pagination buttons row
@@ -753,7 +774,7 @@ class MainActivity : Activity() {
                                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (36 * density).toInt())
                                 setOnClickListener {
                                     currentCatPage--
-                                    renderCategoryTab()
+                                    renderCategoryTab(focusFirst = true)
                                 }
                             }
                             addView(prevBtn)
@@ -778,21 +799,34 @@ class MainActivity : Activity() {
                                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (36 * density).toInt())
                                 setOnClickListener {
                                     currentCatPage++
-                                    renderCategoryTab()
+                                    renderCategoryTab(focusFirst = true)
                                 }
                             }
                             addView(nextBtn)
                         }
                     }
                     itemsContainer.addView(pagerRow)
+                    val pagerTarget = firstFocusableChild(pagerRow)
+                    TvFocusNavigator.wireGrid(
+                        grid?.cards.orEmpty(),
+                        listColumns,
+                        upTarget = sortRowLayout.getChildAt(0) ?: mainTabsLayout.getChildAt(0),
+                        downTarget = pagerTarget
+                    )
 
                     contentFrame.removeAllViews()
                     contentFrame.addView(view)
                     view.post {
-                        val focusId = categoryFocusIds[lastCategoryFocusKey]
-                        val focusTarget = focusId?.let { view.findViewById<View>(it) }
-                            ?: mainTabsLayout.getChildAt(0)
-                        focusTarget?.requestFocus()
+                        val first = grid?.first
+                        if (focusFirst && first != null) {
+                            first.requestFocus()
+                            (itemsContainer.parent as? ScrollView)?.scrollTo(0, 0)
+                        } else {
+                            val focusId = categoryFocusIds[lastCategoryFocusKey]
+                            val focusTarget = focusId?.let { view.findViewById<View>(it) }
+                                ?: mainTabsLayout.getChildAt(0)
+                            focusTarget?.requestFocus()
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -882,10 +916,15 @@ class MainActivity : Activity() {
                             score = it.score
                         )
                     }
-                    renderPosterGrid(itemsContainer, rankItems, listColumns, currentList.map { it.rank })
+                    val topGrid = renderPosterGrid(itemsContainer, rankItems, listColumns, currentList.map { it.rank })
 
                     contentFrame.removeAllViews()
                     contentFrame.addView(view)
+                    TvFocusNavigator.wireGrid(
+                        topGrid?.cards.orEmpty(),
+                        listColumns,
+                        upTarget = activePeriod ?: btnTop
+                    )
                     activePeriod?.let { target ->
                         btnTop.nextFocusDownId = target.id
                         view.post { target.requestFocus() }
@@ -929,7 +968,8 @@ class MainActivity : Activity() {
                     container.addView(heading)
 
                     val pageItems = items.drop((currentDailyPage - 1) * pageSize).take(pageSize)
-                    val firstCard = renderPosterGrid(container, pageItems, listColumns)?.apply {
+                    val dailyGrid = renderPosterGrid(container, pageItems, listColumns)
+                    val firstCard = dailyGrid?.first?.apply {
                         id = View.generateViewId()
                     }
                     if (items.isEmpty()) {
@@ -955,6 +995,12 @@ class MainActivity : Activity() {
 
                     contentFrame.removeAllViews()
                     contentFrame.addView(view)
+                    TvFocusNavigator.wireGrid(
+                        dailyGrid?.cards.orEmpty(),
+                        listColumns,
+                        upTarget = btnDaily,
+                        downTarget = firstFocusableChild(pager)
+                    )
                     firstCard?.let { target ->
                         btnDaily.nextFocusDownId = target.id
                         view.post { target.requestFocus() }
@@ -966,12 +1012,30 @@ class MainActivity : Activity() {
     // -------------------------------------------------------------
     // Tab 5: Favorites & Watch History
     // -------------------------------------------------------------
-    private fun renderMineTab() {
+    private fun renderMineTab(restoreFocus: Boolean = false) {
         val view = inflatePage()
         val filterScroll = view.findViewById<HorizontalScrollView>(R.id.page_filter_scroll)
         val filterContainer = view.findViewById<LinearLayout>(R.id.page_filter_container)
         filterContainer.orientation = LinearLayout.HORIZONTAL
         val itemsContainer = view.findViewById<LinearLayout>(R.id.page_items_container)
+        val itemsScroll = itemsContainer.parent as? ScrollView
+        val cards = mutableListOf<View>()
+        val tabKey = currentMineSubTab
+
+        fun addCard(workItem: WorkItem, onClick: (() -> Unit)? = null) {
+            val card = createWorkCard(workItem)
+            card.tag = workItem.url
+            if (onClick != null) card.setOnClickListener { onClick() }
+            card.setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) {
+                    mineFocusIndex[tabKey] = cards.size
+                    mineFocusUrl[tabKey] = workItem.url
+                    itemsScroll?.post { mineScrollY[tabKey] = itemsScroll.scrollY }
+                }
+            }
+            cards.add(card)
+            itemsContainer.addView(card)
+        }
 
         filterScroll.visibility = View.VISIBLE
         filterContainer.removeAllViews()
@@ -1036,15 +1100,16 @@ class MainActivity : Activity() {
                 itemsContainer.addView(emptyTv)
             } else {
                 for (item in favs) {
-                    val workItem = WorkItem(
-                        title = item.title,
-                        url = item.url,
-                        poster = item.poster,
-                        category = item.category,
-                        year = item.year,
-                        area = item.area
+                    addCard(
+                        WorkItem(
+                            title = item.title,
+                            url = item.url,
+                            poster = item.poster,
+                            category = item.category,
+                            year = item.year,
+                            area = item.area
+                        )
                     )
-                    itemsContainer.addView(createWorkCard(workItem))
                 }
             }
         } else {
@@ -1059,16 +1124,15 @@ class MainActivity : Activity() {
                 itemsContainer.addView(emptyTv)
             } else {
                 for (item in hist) {
-                    val workItem = WorkItem(
-                        title = "${item.title} (${item.episodeTitle})",
-                        url = item.url,
-                        poster = item.poster,
-                        category = item.category,
-                        progress = if (item.progressSec > 0) "上次播放至 ${item.progressSec / 60}分${item.progressSec % 60}秒" else "已观看"
-                    )
-                    itemsContainer.addView(createWorkCard(workItem).apply {
-                        setOnClickListener { openHistory(item) }
-                    })
+                    addCard(
+                        WorkItem(
+                            title = "${item.title} (${item.episodeTitle})",
+                            url = item.url,
+                            poster = item.poster,
+                            category = item.category,
+                            progress = if (item.progressSec > 0) "上次播放至 ${item.progressSec / 60}分${item.progressSec % 60}秒" else "已观看"
+                        )
+                    ) { openHistory(item) }
                 }
             }
         }
@@ -1111,7 +1175,22 @@ class MainActivity : Activity() {
         btnHist.nextFocusLeftId = btnFav.id
         val mineTab = if (currentMineSubTab == "fav") btnFav else btnHist
         btnMine.nextFocusDownId = mineTab.id
-        view.post { mineTab.requestFocus() }
+        TvFocusNavigator.wireList(cards, upTarget = mineTab)
+        mineTab.nextFocusDownId = cards.firstOrNull()?.id ?: mineTab.id
+
+        if (restoreFocus && cards.isNotEmpty()) {
+            val index = mineFocusIndex[tabKey] ?: 0
+            val target = cards.firstOrNull { it.tag == mineFocusUrl[tabKey] }
+                ?: cards.getOrNull(index)
+                ?: cards.last()
+            val scrollY = mineScrollY[tabKey] ?: 0
+            view.post {
+                target.requestFocus()
+                itemsScroll?.scrollTo(0, scrollY)
+            }
+        } else {
+            view.post { mineTab.requestFocus() }
+        }
     }
 
     private fun openHistory(item: HistoryItem) {
@@ -1231,15 +1310,25 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun firstFocusableChild(parent: ViewGroup): View? {
+        for (index in 0 until parent.childCount) {
+            val child = parent.getChildAt(index)
+            if (child.visibility != View.VISIBLE) continue
+            if (child.isFocusable) return child
+            if (child is ViewGroup) firstFocusableChild(child)?.let { return it }
+        }
+        return null
+    }
+
     private fun renderPosterGrid(
         container: LinearLayout,
         items: List<WorkItem>,
         columns: Int = 3,
         ranks: List<Int>? = null
-    ): View? {
+    ): PosterGrid? {
         val density = resources.displayMetrics.density
         var rowLayout: LinearLayout? = null
-        var firstCard: View? = null
+        val cards = mutableListOf<View>()
         for (i in items.indices) {
             if (i % columns == 0) {
                 rowLayout = LinearLayout(this).apply {
@@ -1253,8 +1342,10 @@ class MainActivity : Activity() {
                 }
                 container.addView(rowLayout)
             }
-            val card = createPosterCard(items[i], ranks?.getOrNull(i))
-            if (firstCard == null) firstCard = card
+            val card = createPosterCard(items[i], ranks?.getOrNull(i)).apply {
+                tag = items[i].url
+            }
+            cards.add(card)
             rowLayout?.addView(card)
         }
         val remainder = items.size % columns
@@ -1268,10 +1359,15 @@ class MainActivity : Activity() {
                 rowLayout.addView(dummy)
             }
         }
-        return firstCard
+        return if (cards.isEmpty()) null else PosterGrid(cards)
     }
 
     private fun inflatePage(): View = layoutInflater.inflate(R.layout.fragment_page_list, contentFrame, false).apply {
+        findViewById<ScrollView>(R.id.page_items_scroll)?.apply {
+            isFocusable = false
+            isFocusableInTouchMode = false
+        }
+        findViewById<HorizontalScrollView>(R.id.page_filter_scroll)?.isFocusable = false
         if (tvMode) {
             setBackgroundColor(Color.TRANSPARENT)
             val density = resources.displayMetrics.density
@@ -1411,6 +1507,16 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun restoreCategoryFocus() {
+        val url = categoryReturnUrl ?: return
+        val container = contentFrame.findViewById<LinearLayout>(R.id.page_items_container) ?: return
+        val target = container.findViewWithTag<View>(url)
+        categoryReturnUrl = null
+        if (target == null) return
+        target.requestFocus()
+        (container.parent as? ScrollView)?.scrollTo(0, categoryReturnScroll)
+    }
+
     private fun openDetail(
         url: String,
         title: String = "",
@@ -1418,6 +1524,11 @@ class MainActivity : Activity() {
         category: String? = null,
         year: String? = null
     ) {
+        if (currentTab == NavTab.MINE) mineRestorePending = true
+        if (currentTab == NavTab.CATEGORY) {
+            categoryReturnUrl = url
+            categoryReturnScroll = (contentFrame.findViewById<View>(R.id.page_items_container)?.parent as? ScrollView)?.scrollY ?: 0
+        }
         val intent = Intent(this, DetailActivity::class.java).apply {
             putExtra("url", url)
             if (title.isNotEmpty()) putExtra("title", title)
