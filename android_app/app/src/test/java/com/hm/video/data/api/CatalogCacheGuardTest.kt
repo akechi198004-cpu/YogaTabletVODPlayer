@@ -6,6 +6,8 @@ import com.hm.video.data.cache.CachePolicy
 import com.hm.video.data.cache.MetadataCache
 import com.hm.video.data.model.PageResult
 import com.hm.video.data.model.WorkItem
+import com.hm.video.data.model.ChipOption
+import com.hm.video.data.model.FilterOptions
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -77,6 +79,21 @@ class CatalogCacheGuardTest {
     }
 
     @Test
+    fun filtersAndPaginationDoNotConfirmEmptyOrReplaceGoodCache() {
+        val good = PageResult(listOf(WorkItem("旧作品", "/dianying/old/", "/p.jpg")), 1, 1)
+        disk.put("guard", good, type)
+        val parseFailure = PageResult(
+            items = emptyList(),
+            page = 1,
+            totalPages = 3,
+            filters = FilterOptions(types = listOf(ChipOption("电影", "dianying")))
+        )
+        load(parseFailure, force = true, shouldCache = XingfanRepository::isCacheableCatalogPage)
+        assertFalse(XingfanRepository.isCacheableCatalogPage(parseFailure))
+        assertEquals(good, disk.get<PageResult>("guard", type)!!.value)
+    }
+
+    @Test
     fun catalogCacheabilityDistinguishesConfirmedEmptyFromChallengePage() {
         assertTrue(XingfanRepository.isCacheableCatalogPage(
             PageResult(emptyList(), 1, 1, totalItems = 0)
@@ -86,6 +103,9 @@ class CatalogCacheGuardTest {
         ))
         assertFalse(XingfanRepository.isCacheableCatalogPage(
             PageResult(emptyList(), 2, 1)
+        ))
+        assertFalse(XingfanRepository.isCacheableCatalogPage(
+            PageResult(emptyList(), 1, 3, filters = FilterOptions(types = listOf(ChipOption("电影", "dianying"))))
         ))
     }
 

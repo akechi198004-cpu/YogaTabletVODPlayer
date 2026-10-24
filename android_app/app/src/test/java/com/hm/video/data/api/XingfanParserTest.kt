@@ -62,11 +62,37 @@ class XingfanParserTest {
     }
 
     @Test
-    fun explicitEmptyStateIsConfirmedButChallengePageIsNot() {
+    fun onlyVisibleDomEmptyStateConfirmsZeroResult() {
         val confirmed = XingfanParser.parseSearchPage(
-            "<main><img class='empty-img'><p>没有找到相关内容</p></main>"
+            "<html><body><main><img class='empty-img'><p>没有找到相关内容</p></main></body></html>"
         )
         assertEquals(0, confirmed.totalItems)
+
+        val cssOnly = XingfanParser.parseSearchPage(
+            "<html><head><style>.empty-img { width: 200px; }</style></head><body><main></main></body></html>"
+        )
+        assertNull(cssOnly.totalItems)
+
+        val scriptOnly = XingfanParser.parseSearchPage(
+            "<html><body><main><script>const t = '<div class=\"empty-img\">没有找到相关内容</div>'</script></main></body></html>"
+        )
+        assertNull(scriptOnly.totalItems)
+
+        val templateOnly = XingfanParser.parseSearchPage(
+            "<html><body><main><template><div class='empty-img'>没有找到相关内容</div></template></main></body></html>"
+        )
+        assertNull(templateOnly.totalItems)
+
+        val hiddenOnly = XingfanParser.parseSearchPage(
+            "<html><body><main><div class='empty-img' style='display: none'></div></main></body></html>"
+        )
+        assertNull(hiddenOnly.totalItems)
+
+        val commentOnly = XingfanParser.parseSearchPage(
+            "<html><body><main><!-- <div class='empty-img'></div> --></main></body></html>"
+        )
+        assertNull(commentOnly.totalItems)
+
         assertNull(XingfanParser.parseSearchPage("<html><h1>请完成验证</h1></html>").totalItems)
     }
 }

@@ -175,17 +175,14 @@ object XingfanRepository {
     }
 
     /**
-     * A catalog page is safe to persist when it contains works, or when the source explicitly
-     * confirms an empty result (totalItems == 0, real filter options, or pagination). An empty
-     * parse with none of those signals is treated as a blocked/challenge page and must not
-     * overwrite a previously good cache entry.
+     * A catalog page is safe to persist when it contains works, or when the parser confirmed a
+     * trusted zero result (an explicit visible empty state or a zero total). Filter rows and
+     * pagination alone are not proof: a site layout change can keep them while card parsing
+     * fails, and that must not overwrite a previously good cache entry.
      */
     internal fun isCacheableCatalogPage(page: PageResult): Boolean {
         if (page.items.isNotEmpty()) return true
-        if (page.totalItems == 0 || page.totalPages > 1) return true
-        val filters = page.filters ?: return false
-        return filters.types.isNotEmpty() || filters.areas.isNotEmpty() || filters.years.isNotEmpty() ||
-            filters.letters.isNotEmpty() || filters.sorts.isNotEmpty()
+        return page.totalItems == 0
     }
 
     private fun <T> loadWithCache(

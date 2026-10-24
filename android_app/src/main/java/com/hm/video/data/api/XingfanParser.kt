@@ -5,6 +5,7 @@ import com.google.gson.reflect.TypeToken
 import com.hm.video.data.model.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.regex.Pattern
 
@@ -12,8 +13,7 @@ object XingfanParser {
 
     private val gson = Gson()
     private val PROGRESS_REGEX = Pattern.compile("更新至\\s*\\d+\\s*集|全\\s*\\d+\\s*集")
-    private val EMPTY_STATE_MARKERS = listOf(
-        "empty-img",
+    private val EMPTY_STATE_TEXTS = setOf(
         "没有找到相关内容",
         "未找到相关内容",
         "暂无相关内容",
@@ -137,9 +137,9 @@ object XingfanParser {
         }
 
         val pagination = parsePagination(doc)
-        val totalItems = parseTotalItems(html)
+        val totalItems = parseTotalItems(doc)
         val filters = parseFilterOptions(doc)
-        val confirmedEmpty = items.isEmpty() && hasExplicitEmptyState(html)
+        val confirmedEmpty = items.isEmpty() && hasConfirmedEmptyState(doc)
 
         return PageResult(
             items = items,
@@ -185,8 +185,8 @@ object XingfanParser {
         }
 
         val pagination = parsePagination(doc)
-        val totalItems = parseTotalItems(html)
-        val confirmedEmpty = items.isEmpty() && hasExplicitEmptyState(html)
+        val totalItems = parseTotalItems(doc)
+        val confirmedEmpty = items.isEmpty() && hasConfirmedEmptyState(doc)
 
         return PageResult(
             items = items,
@@ -532,13 +532,39 @@ object XingfanParser {
         return Pair(page, totalPages)
     }
 
-    private fun parseTotalItems(html: String): Int? {
-        val m = Pattern.compile("共\\s*(\\d+)\\s*[条个部]").matcher(html)
-        return if (m.find()) m.group(1)?.toIntOrNull() else null
+    private fun parseTotalItems(doc: Document): Int? {
+        val pattern = Pattern.compile("共\\s*(\\d+)\\s*[条个部]")
+        for (element in doc.select("body *")) {
+            if (element.children().isNotEmpty() || !isVisibleResultNode(element)) continue
+            val matcher = pattern.matcher(element.text())
+            if (matcher.find()) return matcher.group(1)?.toIntOrNull()
+        }
+        return null
     }
 
-    private fun hasExplicitEmptyState(html: String): Boolean =
-        EMPTY_STATE_MARKERS.any { marker -> html.contains(marker, ignoreCase = true) }
+    private fun hasConfirmedEmptyState(doc: Document): Boolean {
+        val roots = doc.select("main").ifEmpty { listOfNotNull(doc.body()) }
+        return roots.any { root ->
+            root.select("img.empty-img, .empty-img").any(::isVisibleResultNode) ||
+                root.select("p, div, span").any { node ->
+                    isVisibleResultNode(node) && node.text().trim() in EMPTY_STATE_TEXTS
+                }
+        }
+    }
+
+    /** Reject templates, scripts, styles and explicitly hidden empty-state markup. */
+    private fun isVisibleResultNode(element: Element): Boolean {
+        var current: Element? = element
+        while (current != null) {
+            if (current.tagName() in setOf("template", "script", "style", "noscript")) return false
+            if (current.hasAttr("hidden") || current.attr("aria-hidden").equals("true", ignoreCase = true)) return false
+            if (current.hasClass("hidden") || current.hasClass("x-cloak")) return false
+            val style = current.attr("style").filterNot { it.isWhitespace() }.lowercase()
+            if (style.contains("display:none") || style.contains("visibility:hidden")) return false
+            current = current.parent()
+        }
+        return true
+    }
 
     private fun parseFilterOptions(doc: Document): FilterOptions {
         val types = mutableListOf<ChipOption>()
