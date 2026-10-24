@@ -12,6 +12,14 @@ object XingfanParser {
 
     private val gson = Gson()
     private val PROGRESS_REGEX = Pattern.compile("更新至\\s*\\d+\\s*集|全\\s*\\d+\\s*集")
+    private val EMPTY_STATE_MARKERS = listOf(
+        "empty-img",
+        "没有找到相关内容",
+        "未找到相关内容",
+        "暂无相关内容",
+        "没有相关结果",
+        "暂无结果"
+    )
 
     fun parseHomePage(html: String): HomeData {
         val doc: Document = Jsoup.parse(html)
@@ -131,12 +139,13 @@ object XingfanParser {
         val pagination = parsePagination(doc)
         val totalItems = parseTotalItems(html)
         val filters = parseFilterOptions(doc)
+        val confirmedEmpty = items.isEmpty() && hasExplicitEmptyState(html)
 
         return PageResult(
             items = items,
             page = if (requestedPage > 0) requestedPage else pagination.first,
             totalPages = pagination.second,
-            totalItems = totalItems,
+            totalItems = if (confirmedEmpty) 0 else totalItems,
             filters = filters
         )
     }
@@ -177,12 +186,13 @@ object XingfanParser {
 
         val pagination = parsePagination(doc)
         val totalItems = parseTotalItems(html)
+        val confirmedEmpty = items.isEmpty() && hasExplicitEmptyState(html)
 
         return PageResult(
             items = items,
             page = if (requestedPage > 0) requestedPage else pagination.first,
             totalPages = pagination.second,
-            totalItems = totalItems
+            totalItems = if (confirmedEmpty) 0 else totalItems
         )
     }
 
@@ -526,6 +536,9 @@ object XingfanParser {
         val m = Pattern.compile("共\\s*(\\d+)\\s*[条个部]").matcher(html)
         return if (m.find()) m.group(1)?.toIntOrNull() else null
     }
+
+    private fun hasExplicitEmptyState(html: String): Boolean =
+        EMPTY_STATE_MARKERS.any { marker -> html.contains(marker, ignoreCase = true) }
 
     private fun parseFilterOptions(doc: Document): FilterOptions {
         val types = mutableListOf<ChipOption>()

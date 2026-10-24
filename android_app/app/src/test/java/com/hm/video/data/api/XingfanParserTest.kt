@@ -60,4 +60,13 @@ class XingfanParserTest {
         assertTrue(challenge.hero.isEmpty())
         assertTrue(challenge.recent.isEmpty())
     }
+
+    @Test
+    fun explicitEmptyStateIsConfirmedButChallengePageIsNot() {
+        val confirmed = XingfanParser.parseSearchPage(
+            "<main><img class='empty-img'><p>没有找到相关内容</p></main>"
+        )
+        assertEquals(0, confirmed.totalItems)
+        assertNull(XingfanParser.parseSearchPage("<html><h1>请完成验证</h1></html>").totalItems)
+    }
 }

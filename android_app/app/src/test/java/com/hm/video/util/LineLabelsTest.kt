@@ -38,6 +38,19 @@ class LineLabelsTest {
     }
 
     @Test
+    fun handlesTwoPartCountrySuffixesWithoutCollapsingToCo() {
+        assertEquals(
+            listOf("provider-a", "provider-b", "provider-c", "provider-d"),
+            lineLabels(listOf(
+                PlayLine("a", "https://video.provider-a.co.uk/a.m3u8"),
+                PlayLine("b", "https://video.provider-b.co.uk/a.m3u8"),
+                PlayLine("c", "https://video.provider-c.co.jp/a.m3u8"),
+                PlayLine("d", "https://provider-d.co.jp/a.m3u8")
+            ))
+        )
+    }
+
+    @Test
     fun keepsOriginalNameWhenUrlHasNoUsableHost() {
         assertEquals(
             listOf("备用线路", "relative"),

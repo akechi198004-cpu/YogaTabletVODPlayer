@@ -174,6 +174,20 @@ object XingfanRepository {
         return error is HttpStatusException && (error.code == 404 || error.code == 410)
     }
 
+    /**
+     * A catalog page is safe to persist when it contains works, or when the source explicitly
+     * confirms an empty result (totalItems == 0, real filter options, or pagination). An empty
+     * parse with none of those signals is treated as a blocked/challenge page and must not
+     * overwrite a previously good cache entry.
+     */
+    internal fun isCacheableCatalogPage(page: PageResult): Boolean {
+        if (page.items.isNotEmpty()) return true
+        if (page.totalItems == 0 || page.totalPages > 1) return true
+        val filters = page.filters ?: return false
+        return filters.types.isNotEmpty() || filters.areas.isNotEmpty() || filters.years.isNotEmpty() ||
+            filters.letters.isNotEmpty() || filters.sorts.isNotEmpty()
+    }
+
     private fun <T> loadWithCache(
         memory: ConcurrentHashMap<String, CacheEntry<T>>,
         key: String,
@@ -338,7 +352,7 @@ object XingfanRepository {
         val urlPath = XingfanClient.buildListUrl(cat, page, type, area, year, letter, sort)
         val key = "list:$urlPath"
         return loadWithCache(listCache, key, typePage, CachePolicy.LIST, forceRefresh,
-            shouldCache = { it.items.isNotEmpty() }) { etag, lastModified ->
+            shouldCache = { isCacheableCatalogPage(it) }) { etag, lastModified ->
             val response = XingfanClient.fetchPageWithValidators(urlPath, etag = etag, lastModified = lastModified)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
@@ -356,7 +370,7 @@ object XingfanRepository {
         val urlPath = XingfanClient.buildSearchUrl(keyword, cid, page)
         val key = "search:$urlPath"
         return loadWithCache(listCache, key, typePage, CachePolicy.SEARCH, forceRefresh,
-            shouldCache = { it.items.isNotEmpty() }) { etag, lastModified ->
+            shouldCache = { isCacheableCatalogPage(it) }) { etag, lastModified ->
             val response = XingfanClient.fetchPageWithValidators(urlPath, etag = etag, lastModified = lastModified)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)

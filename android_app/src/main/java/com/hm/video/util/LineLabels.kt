@@ -39,7 +39,7 @@ private fun providerLabel(line: PlayLine): String {
     if (parts.size < 2) return host
     val secondLevel = parts[parts.size - 2]
     val topLevel = parts.last()
-    val commonSecondLevels = setOf("com", "net", "org", "gov", "edu")
+    val commonSecondLevels = setOf("com", "net", "org", "gov", "edu", "co", "ac", "go", "or", "ne")
     val twoPartSuffixes = setOf("cn", "uk", "jp", "kr", "tw", "hk")
     return if (topLevel in twoPartSuffixes && secondLevel in commonSecondLevels && parts.size >= 3) {
         parts[parts.size - 3]
