@@ -13,7 +13,8 @@ object QrCode {
         if (text.isBlank() || sizePx <= 0) return null
         return try {
             val hints = EnumMap<EncodeHintType, Any>(EncodeHintType::class.java).apply {
-                put(EncodeHintType.CHARACTER_SET, "UTF-8")
+                // The URL is plain ASCII, so leave the default ISO-8859-1 encoding: it avoids an
+                // ECI header that some older phone scanners refuse to decode.
                 put(EncodeHintType.MARGIN, 1)
             }
             val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, sizePx, sizePx, hints)

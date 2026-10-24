@@ -180,7 +180,7 @@ class PhoneInputServer(
                     }
                     val pathCode = request.path.trim('/').lowercase()
                     if (pathCode != sessionCode || request.path.count { it == '/' } != 1) {
-                        return@use fail(client, request, 404, "??????????????????????", retryable = false)
+                        return@use fail(client, request, 404, "地址已失效，请回到电视重新打开“手机输入”。", retryable = false)
                     }
                     when (request.method) {
                         "GET" -> {
@@ -445,6 +445,18 @@ class PhoneInputServer(
         title = "手机输入",
         body = buildString {
             append("<p class=\"hint\">发送后，请在电视上查看搜索结果。</p>")
+            append("<div id=\"phone-i18n\" hidden>")
+            append("<span id=\"msg-send\">发送到电视</span>")
+            append("<span id=\"msg-busy\">发送中…</span>")
+            append("<span id=\"msg-sending\">正在发送…</span>")
+            append("<span id=\"msg-empty\">请输入搜索词。</span>")
+            append("<span id=\"msg-ok\">已发送到电视，请使用电视遥控器继续操作。</span>")
+            append("<span id=\"msg-timeout\">发送超时，无法确认是否已送达。请先查看电视是否已开始搜索；若没有，可点“重试”。</span>")
+            append("<span id=\"msg-network\">网络中断，无法确认是否已送达。请先查看电视是否已开始搜索；若没有，可点“重试”。</span>")
+            append("<span id=\"msg-terminal\">地址已失效，请回到电视重新打开“手机输入”。</span>")
+            append("<span id=\"msg-fail\">发送失败（</span>")
+            append("<span id=\"msg-retry\">），请重试。</span>")
+            append("</div>")
             append("<form id=\"phone-form\" method=\"post\" action=\"/").append(sessionCode).append("\" accept-charset=\"UTF-8\">")
             append("<input id=\"phone-keyword\" name=\"keyword\" type=\"text\" maxlength=\"").append(MAX_KEYWORD_CHARS)
                 .append("\" autocomplete=\"off\" autocapitalize=\"off\" value=\"")
@@ -458,7 +470,7 @@ class PhoneInputServer(
             append("<button id=\"phone-retry\" class=\"secondary\" type=\"button\" hidden>重试</button>")
             append("</form>")
             append(
-                "<script>(function(){var f=document.getElementById('phone-form'),i=document.getElementById('phone-keyword'),s=document.getElementById('phone-status'),b=document.getElementById('phone-send'),r=document.getElementById('phone-retry'),busy=false,seq=0;function show(m,c){s.textContent=m;s.className='status '+c;}function succeed(){busy=true;b.disabled=true;b.hidden=true;r.hidden=true;i.readOnly=true;show('????????????????????','ok');}function fail(m,retry){busy=!retry;b.disabled=!retry;b.hidden=!retry;b.textContent='?????';r.hidden=!retry;show(m,'error');}function send(){if(busy)return;var v=i.value;if(!v.trim()){show('???????','error');i.focus();return;}var id=++seq,settled=false,controller=null;try{controller=new AbortController();}catch(e){controller=null;}var timer=setTimeout(function(){if(settled||id!==seq)return;settled=true;if(controller){try{controller.abort();}catch(e){}}fail('????????????????????????????????????????',true);},12000);busy=true;b.disabled=true;b.textContent='????';r.hidden=true;show('?????','hint');var opts={method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8','Accept':'application/json'},body:'keyword='+encodeURIComponent(v),cache:'no-store',credentials:'omit'};if(controller)opts.signal=controller.signal;function finish(fn){if(settled||id!==seq)return;settled=true;clearTimeout(timer);fn();}fetch(f.getAttribute('action'),opts).then(function(res){return res.text().then(function(t){return {res:res,t:t};});}).then(function(o){finish(function(){var d=null;try{d=JSON.parse(o.t);}catch(e){}if(o.res.ok&&d&&d.ok){succeed();return;}var terminal=!d&&(o.res.status===404||o.res.status===409||o.res.status===410);var m=(d&&d.message)||(terminal?'??????????????????????':('?????'+o.res.status+'??????'));fail(m,d?d.retryable!==false:!terminal);});}).catch(function(){finish(function(){fail('????????????????????????????????????????',true);});});}f.addEventListener('submit',function(e){e.preventDefault();send();});r.addEventListener('click',send);i.addEventListener('input',function(){if(s.className.indexOf('error')>=0){s.textContent='';s.className='status';}});})();</script>"
+                "<script>(function(){var f=document.getElementById('phone-form'),i=document.getElementById('phone-keyword'),s=document.getElementById('phone-status'),b=document.getElementById('phone-send'),r=document.getElementById('phone-retry'),busy=false,seq=0; function t(id){var n=document.getElementById(id);return n?n.textContent:'';} function show(m,c){s.textContent=m;s.className='status '+c;} function succeed(){busy=true;b.disabled=true;b.hidden=true;r.hidden=true;i.readOnly=true;show(t('msg-ok'),'ok');} function fail(m,retry){busy=!retry;b.disabled=!retry;b.hidden=!retry;b.textContent=t('msg-send');r.hidden=!retry;show(m,'error');} function send(){if(busy)return;var v=i.value;if(!v.trim()){show(t('msg-empty'),'error');i.focus();return;} var id=++seq,settled=false,controller=null;try{controller=new AbortController();}catch(e){controller=null;} var timer=setTimeout(function(){if(settled||id!==seq)return;settled=true;if(controller){try{controller.abort();}catch(e){}}fail(t('msg-timeout'),true);},12000); busy=true;b.disabled=true;b.textContent=t('msg-busy');r.hidden=true;show(t('msg-sending'),'hint'); var opts={method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8','Accept':'application/json'},body:'keyword='+encodeURIComponent(v),cache:'no-store',credentials:'omit'}; if(controller)opts.signal=controller.signal; function finish(fn){if(settled||id!==seq)return;settled=true;clearTimeout(timer);fn();} fetch(f.getAttribute('action'),opts).then(function(res){return res.text().then(function(x){return {res:res,t:x};});}) .then(function(o){finish(function(){var d=null;try{d=JSON.parse(o.t);}catch(e){} if(o.res.ok&&d&&d.ok){succeed();return;} var terminal=!d&&(o.res.status===404||o.res.status===409||o.res.status===410); var m=(d&&d.message)||(terminal?t('msg-terminal'):(t('msg-fail')+o.res.status+t('msg-retry'))); fail(m,d?d.retryable!==false:!terminal);});}) .catch(function(){finish(function(){fail(t('msg-network'),true);});});} f.addEventListener('submit',function(e){e.preventDefault();send();}); r.addEventListener('click',send); i.addEventListener('input',function(){if(s.className.indexOf('error')>=0){s.textContent='';s.className='status';}});})();</script>"
             )
         }
     )
