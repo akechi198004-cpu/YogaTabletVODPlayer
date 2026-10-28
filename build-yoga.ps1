@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$Online)
 $ErrorActionPreference = 'Stop'
 # All writable tool state belongs to this isolated copy.
 $toolRoot = Join-Path $PSScriptRoot '.build_cache/tools'
@@ -23,7 +23,9 @@ try {
     [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'android_app/local.properties'), 'sdk.dir=' + ($env:ANDROID_HOME -replace '\\', '/'))
     Push-Location (Join-Path $PSScriptRoot 'android_app')
     try {
-        & $gradle assembleDebug testDebugUnitTest lintDebug --offline --stacktrace --console=plain --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx1536m' '-Pkotlin.compiler.execution.strategy=in-process'
+        $gradleArgs = @('assembleDebug','testDebugUnitTest','lintDebug','--stacktrace','--console=plain','--no-daemon','--max-workers=2','-Dorg.gradle.jvmargs=-Xmx1536m','-Pkotlin.compiler.execution.strategy=in-process')
+        if (!$Online) { $gradleArgs += '--offline' }
+        & $gradle @gradleArgs '-Dorg.gradle.jvmargs=-Xmx1536m' '-Pkotlin.compiler.execution.strategy=in-process'
         if ($LASTEXITCODE -ne 0) { throw "Build/checks failed ($LASTEXITCODE)" }
     } finally { Pop-Location }
 } finally {

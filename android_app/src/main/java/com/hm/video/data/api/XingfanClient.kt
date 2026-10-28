@@ -1,11 +1,12 @@
 package com.hm.video.data.api
 
 import okhttp3.OkHttpClient
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl
 import okhttp3.Request
 import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
 
 /** Thrown for non-success HTTP responses so callers can tell "gone" from "network down". */
 class HttpStatusException(val code: Int, message: String) : IOException(message)
@@ -15,13 +16,13 @@ object XingfanClient {
     private fun createHttpClient(): OkHttpClient = OkHttpClient.Builder()
         .apply { com.hm.video.util.LegacyTls.configure(this) }
         .addInterceptor { chain ->
-            val target = chain.request().url
+            val target = chain.request().url()
             try {
                 chain.proceed(chain.request()).also { response ->
-                    android.util.Log.i("HMNetwork", "${response.code} ${target.host}${target.encodedPath}")
+                    android.util.Log.i("HMNetwork", "${response.code()} ${target.host()}${target.encodedPath()}")
                 }
             } catch (error: IOException) {
-                android.util.Log.w("HMNetwork", "Request failed: ${target.host}${target.encodedPath}", error)
+                android.util.Log.w("HMNetwork", "Request failed: ${target.host()}${target.encodedPath()}", error)
                 throw error
             }
         }
@@ -31,6 +32,14 @@ object XingfanClient {
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
+
+    const val PAGE_CALL_TIMEOUT_SEC = 20L
+    private val deadlineExecutor = Executors.newSingleThreadScheduledExecutor { runnable -> Thread(runnable, "hm-http-deadline").apply { isDaemon = true } }
+
+    fun executePageCall(call: okhttp3.Call): okhttp3.Response {
+        val timeout = deadlineExecutor.schedule({ call.cancel() }, PAGE_CALL_TIMEOUT_SEC, TimeUnit.SECONDS)
+        try { return call.execute() } finally { timeout.cancel(false) }
+    }
 
     val httpClient: OkHttpClient = createHttpClient()
 
@@ -85,25 +94,25 @@ object XingfanClient {
         if (!etag.isNullOrEmpty()) requestBuilder.header("If-None-Match", etag)
         if (!lastModified.isNullOrEmpty()) requestBuilder.header("If-Modified-Since", lastModified)
 
-        httpClient.newCall(requestBuilder.build()).execute().use { response ->
-            if (response.code == 304) {
+        executePageCall(httpClient.newCall(requestBuilder.build())).use { response ->
+            if (response.code() == 304) {
                 return PageResponse(
                     html = null,
-                    finalUrl = response.request.url.toString(),
+                    finalUrl = response.request().url().toString(),
                     etag = response.header("ETag") ?: etag,
                     lastModified = response.header("Last-Modified") ?: lastModified,
                     notModified = true
                 )
             }
-            if (!response.isSuccessful) {
+            if (!response.isSuccessful()) {
                 throw HttpStatusException(
-                    response.code,
-                    "HTTP ${response.code} error fetching $targetUrl"
+                    response.code(),
+                    "HTTP ${response.code()} error fetching $targetUrl"
                 )
             }
             return PageResponse(
-                html = response.body?.string() ?: "",
-                finalUrl = response.request.url.toString(),
+                html = response.body()?.string() ?: "",
+                finalUrl = response.request().url().toString(),
                 etag = response.header("ETag"),
                 lastModified = response.header("Last-Modified"),
                 notModified = false
@@ -151,7 +160,7 @@ object XingfanClient {
         val normalized = when {
             apiurl.startsWith("//") -> "https:$apiurl"
             apiurl.startsWith("http://") || apiurl.startsWith("https://") -> apiurl
-            else -> XingfanConfig.SOURCE_BASE.toHttpUrl().resolve(apiurl)?.toString()
+            else -> HttpUrl.parse(XingfanConfig.SOURCE_BASE)?.resolve(apiurl)?.toString()
                 ?: "${XingfanConfig.SOURCE_BASE}/$apiurl"
         }
         // Player API templates may end in a query parameter prefix such as `?url=`.

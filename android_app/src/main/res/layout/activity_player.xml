@@ -131,7 +131,7 @@
             android:orientation="horizontal"
             android:gravity="center">
 
-            <ImageButton
+            <androidx.appcompat.widget.AppCompatImageButton
                 android:id="@+id/player_btn_rewind"
                 android:layout_width="64dp"
                 android:layout_height="64dp"
@@ -143,7 +143,7 @@
                 android:background="@drawable/bg_pill"
                 />
 
-            <ImageButton
+            <androidx.appcompat.widget.AppCompatImageButton
                 android:id="@+id/player_btn_play_pause"
                 android:layout_width="80dp"
                 android:layout_height="80dp"
@@ -158,7 +158,7 @@
                 android:layout_marginEnd="24dp"
                 android:background="@drawable/bg_gradient_button" />
 
-            <ImageButton
+            <androidx.appcompat.widget.AppCompatImageButton
                 android:id="@+id/player_btn_forward"
                 android:layout_width="64dp"
                 android:layout_height="64dp"

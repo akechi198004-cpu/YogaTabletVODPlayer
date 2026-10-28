@@ -115,10 +115,10 @@ object HlsLocalProxy {
             .build()
         try {
             XingfanClient.playbackHttpClient.newCall(request).execute().use { response ->
-                val body = response.body
+                val body = response.body()
                 val contentType = response.header("Content-Type").orEmpty()
-                val finalUrl = response.request.url.toString()
-                val isPlaylist = response.isSuccessful && (contentType.contains("mpegurl", true) || targetUrl.contains(".m3u8", true))
+                val finalUrl = response.request().url().toString()
+                val isPlaylist = response.isSuccessful() && (contentType.contains("mpegurl", true) || targetUrl.contains(".m3u8", true))
                 val output = BufferedOutputStream(socket.getOutputStream())
                 if (isPlaylist) {
                     val playlist = body?.string().orEmpty()
@@ -126,7 +126,7 @@ object HlsLocalProxy {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${rewritten.size}\r\nConnection: close\r\n\r\n".toByteArray())
                     output.write(rewritten)
                 } else {
-                    val code = response.code
+                    val code = response.code()
                     val reason = when (code) {
                         200 -> "OK"; 206 -> "Partial Content"; 301 -> "Moved Permanently"; 302 -> "Found"
                         403 -> "Forbidden"; 404 -> "Not Found"; 416 -> "Range Not Satisfiable"

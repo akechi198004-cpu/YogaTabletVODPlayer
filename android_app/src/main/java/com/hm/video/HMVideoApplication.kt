@@ -1,12 +1,12 @@
 package com.hm.video
 
-import android.app.Application
+import androidx.multidex.MultiDexApplication
 import com.hm.video.data.api.XingfanRepository
 import com.hm.video.data.storage.UserStorageManager
 import com.hm.video.player.HlsLocalProxy
 import com.hm.video.util.ImageLoader
 
-class HMVideoApplication : Application() {
+class HMVideoApplication : MultiDexApplication() {
 
     lateinit var storageManager: UserStorageManager
         private set

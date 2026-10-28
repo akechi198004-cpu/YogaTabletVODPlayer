@@ -312,10 +312,10 @@ object XingfanRepository {
             .header("User-Agent", XingfanConfig.USER_AGENT)
             .header("Referer", referer ?: "${XingfanConfig.SOURCE_BASE}/")
         XingfanClient.httpClient.newCall(requestBuilder.build()).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw HttpStatusException(response.code, "HTTP ${response.code} error fetching ${response.request.url}")
+            if (!response.isSuccessful()) {
+                throw HttpStatusException(response.code(), "HTTP ${response.code()} error fetching ${response.request().url()}")
             }
-            return FetchedPage(response.body?.string().orEmpty(), response.request.url.toString())
+            return FetchedPage(response.body()?.string().orEmpty(), response.request().url().toString())
         }
     }
 

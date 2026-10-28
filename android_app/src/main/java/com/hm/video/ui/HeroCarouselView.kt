@@ -46,8 +46,10 @@ class HeroCarouselView(
         isFocusable = true
         isClickable = true
         setBackgroundResource(R.drawable.bg_card)
-        foreground = resources.getDrawable(R.drawable.bg_hero_focus, context.theme)
-        clipToOutline = true
+        if (android.os.Build.VERSION.SDK_INT >= 21) {
+            foreground = resources.getDrawable(R.drawable.bg_hero_focus, context.theme)
+            clipToOutline = true
+        }
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         artwork.scaleType = ImageView.ScaleType.CENTER_CROP
         artwork.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -169,8 +171,15 @@ class HeroCarouselView(
         super.onInitializeAccessibilityNodeInfo(info)
         if (slides.size > 1) {
             info.isScrollable = true
-            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
-            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+            if (android.os.Build.VERSION.SDK_INT >= 21) {
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+            } else {
+                @Suppress("DEPRECATION")
+                info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                @Suppress("DEPRECATION")
+                info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+            }
         }
     }
 

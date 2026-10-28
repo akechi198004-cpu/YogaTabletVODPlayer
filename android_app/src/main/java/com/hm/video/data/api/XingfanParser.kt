@@ -6,7 +6,7 @@ import com.hm.video.data.model.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.HttpUrl
 import java.util.regex.Pattern
 
 object XingfanParser {
@@ -503,7 +503,7 @@ object XingfanParser {
         val cleaned = value.trim().replace("\\/", "/")
         if (cleaned.isEmpty()) return ""
         val normalizedBase = if (baseUrl.startsWith("http")) baseUrl else XingfanConfig.SOURCE_BASE
-        return normalizedBase.toHttpUrlOrNull()?.resolve(cleaned)?.toString().orEmpty()
+        return HttpUrl.parse(normalizedBase)?.resolve(cleaned)?.toString().orEmpty()
     }
 
     private fun parsePagination(doc: Document): Pair<Int, Int> {

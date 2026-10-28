@@ -9,7 +9,8 @@ android {
 
     defaultConfig {
         applicationId = "com.hm.video.letv"
-        minSdk = 23
+        minSdk = 19
+        multiDexEnabled = true
         targetSdk = 34
         versionCode = 6
         versionName = "2.4.0-tv"
@@ -52,9 +53,11 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.squareup.okio:okio:3.6.0")
+    implementation("com.squareup.okhttp3:okhttp:3.12.13")
+    implementation("com.squareup.okio:okio:1.17.5")
     implementation("org.jsoup:jsoup:1.17.2")
+    implementation("androidx.multidex:multidex:2.0.1")
+    implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.code.gson:gson:2.10.1")
     implementation("com.google.zxing:core:3.5.3")
     implementation("androidx.media3:media3-exoplayer:1.4.1")

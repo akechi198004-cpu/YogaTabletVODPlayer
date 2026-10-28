@@ -1,7 +1,7 @@
 package com.hm.video.util
 
 import com.hm.video.data.model.PlayLine
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.HttpUrl
 
 /**
  * Short, stable source labels for the line selector.
@@ -27,8 +27,8 @@ fun lineLabels(lines: List<PlayLine>): List<String> {
 }
 
 private fun providerLabel(line: PlayLine): String {
-    val host = line.url.toHttpUrlOrNull()
-        ?.host
+    val host = HttpUrl.parse(line.url)
+        ?.host()
         ?.removePrefix("www.")
         ?.lowercase()
         ?.takeIf { it.isNotBlank() }

@@ -179,13 +179,13 @@ object ImageLoader {
             }
             try {
                 call.execute().use { response ->
-                    if (response.code == 404 || response.code == 410) {
+                    if (response.code() == 404 || response.code() == 410) {
                         diskCache?.remove(url)
                         removeMemory(url)
                         return
                     }
-                    if (!response.isSuccessful) return
-                    val stream: InputStream? = response.body?.byteStream()
+                    if (!response.isSuccessful()) return
+                    val stream: InputStream? = response.body()?.byteStream()
                     val bytes = stream?.use { readBounded(it, CacheConfig.IMAGE_MAX_ENTRY_BYTES.toInt()) } ?: return
                     if (!isCurrent(imageView, requestedUrl)) return
                     val bitmap = decode(bytes, 0, bytes.size, targetWidth, targetHeight) ?: return
@@ -221,19 +221,19 @@ object ImageLoader {
                         .build()
                     XingfanClient.httpClient.newCall(request).execute().use { response ->
                         when {
-                            response.code == 304 -> {
+                            response.code() == 304 -> {
                                 disk.markValidated(url)
                                 val now = System.currentTimeMillis()
                                 memoryCache.snapshot().filterKeys { it.url == url }.forEach { (key, value) ->
                                     memoryCache.put(key, value.copy(fetchedAt = now))
                                 }
                             }
-                            response.code == 404 || response.code == 410 -> {
+                            response.code() == 404 || response.code() == 410 -> {
                                 disk.remove(url)
                                 removeMemory(url)
                             }
-                            response.isSuccessful -> {
-                                val bytes = response.body?.byteStream()
+                            response.isSuccessful() -> {
+                                val bytes = response.body()?.byteStream()
                                     ?.use { readBounded(it, CacheConfig.IMAGE_MAX_ENTRY_BYTES.toInt()) }
                                 if (bytes != null && isDecodable(bytes, 0, bytes.size)) {
                                     disk.put(url, bytes)

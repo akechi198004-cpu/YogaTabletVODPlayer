@@ -25,7 +25,7 @@ class LineProbe {
     private val client = XingfanClient.httpClient.newBuilder()
         .connectTimeout(2500, TimeUnit.MILLISECONDS)
         .readTimeout(2500, TimeUnit.MILLISECONDS)
-        .callTimeout(4, TimeUnit.SECONDS).build()
+.build()
 
     fun cancel() {
         cancelled = true
@@ -69,10 +69,10 @@ class LineProbe {
         if (cancelled) call.cancel()
         try {
             call.execute().use { response ->
-                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                if (!response.isSuccessful()) throw IOException("HTTP ${response.code()}")
                 val type = response.header("Content-Type").orEmpty().lowercase()
                 if (type.contains("text/html") || type.contains("application/json")) throw IOException("Not media")
-                val body = response.body ?: throw IOException("Empty body")
+                val body = response.body() ?: throw IOException("Empty body")
                 val buffer = ByteArray(8192)
                 val output = ByteArrayOutputStream()
                 body.byteStream().use { input ->
@@ -92,7 +92,7 @@ class LineProbe {
                     // Follow the first advertised variant, then a real media segment.
                     val child = playlist.firstOrNull { it.isNotBlank() && !it.startsWith("#") }
                         ?: throw IOException("Empty playlist")
-                    return sample(URI(response.request.url.toString()).resolve(child).toString(), referer, depth + 1)
+                    return sample(URI(response.request().url().toString()).resolve(child).toString(), referer, depth + 1)
                 }
                 return data.size
             }
