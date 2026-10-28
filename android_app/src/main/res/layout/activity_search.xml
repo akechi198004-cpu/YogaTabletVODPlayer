@@ -52,17 +52,6 @@
             android:paddingStart="16dp"
             android:paddingEnd="16dp" />
 
-        <Button
-            android:id="@+id/search_btn_phone_input"
-            android:layout_width="wrap_content"
-            android:layout_height="38dp"
-            android:layout_marginStart="8dp"
-            android:background="@drawable/bg_pill"
-            android:text="手机输入"
-            android:textColor="@color/text_white"
-            android:textSize="13sp"
-            android:paddingStart="16dp"
-            android:paddingEnd="16dp" />
     </LinearLayout>
 
     <!-- Search Category Filter Tabs -->
