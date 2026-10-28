@@ -49,3 +49,47 @@
 - 已检查 APK 清单（含依赖合并权限）、DEX 中首页 API 调用与 OkHttp 分支，以及图标打包资源；实际证据在忽略的 `.build_cache/`，不是仅依据网页或 Gradle 声明判断。
 - 原目录 111 个跟踪文件再次逐一比对初始 SHA-256，全部未变。本轮只修改本副本说明和构建辅助脚本；未运行 adb、未安装、未改设置。
 - **未验证**：API 19 启动/主题/布局、真实网络与 TLS、硬件解码/HLS/倍速/切线、触控与旋转、API 19 多 DEX 启动及完整依赖可达性。本轮没有进行 API 19 功能适配，等待后续具体需求。
+
+## 第二轮：真机适配（2026-10-29，提交 b32f6fd / 3f8cbf8）
+
+### 先复核设备（不沿用文档假设）
+
+```
+adb -s 192.168.0.56:5555 shell getprop ro.build.version.sdk   -> 19
+adb ... getprop ro.build.version.release                      -> 4.4.2
+adb ... getprop ro.product.cpu.abi / ro.sf.lcd_density        -> armeabi-v7a / 213
+adb ... wm size                                               -> Physical size: 1280x800
+adb ... pm list features | grep touchscreen                   -> 存在 touchscreen
+```
+
+结论：本机有 `FEATURE_TOUCHSCREEN` 且 UI mode 不是 television，原 `isTvDevice()`
+返回 false，所以装的是手机布局。源码没有落后于 LeTV 源（文件清单一致）。
+
+### 已修复（按真机证据）
+
+| 问题 | 证据 | 处理 |
+| --- | --- | --- |
+| HTTPS 全部失败 | logcat `error:1407742E ... tlsv1 alert protocol version`；设备 `supported=SSLv3,TLSv1,TLSv1.1,TLSv1.2`，默认 `enabled=TLSv1` | `LegacyTls` 包装 SSLSocketFactory 强制 1.2/1.1/1.0；OkHttp 显式给 `MODERN_TLS` + 三版本 spec；额外根证书换成 ISRG X1/X2、Amazon Root CA1、DigiCert G2，仅作平台库兜底 |
+| 启动图标/播放键空白 | 五个资源都是 `<vector>`，4.4 框架无法加载 | 用 GDI+ 生成 mdpi..xxhdpi PNG（形状同原 pathData），`AppCompatImageButton` 改回 `ImageButton` |
+| 界面不是"顶栏导航＋宽幅海报" | 平板被判成非 TV | 新增 `DisplayProfile.isLeanbackLayout()`：电视、无触屏或宽度 ≥600dp 都走 leanback 布局；MainActivity / DetailActivity 采用，PlayerActivity 保持原判定 |
+| 首页失败无日志 | `runCatching` 静默吞异常 | MainActivity 用 `HMNetwork` 打印异常堆栈 |
+| 搜索页"手机输入" | 平板自带键盘 | 删除 `remoteinput/*`、二维码弹窗、按钮与单测，并移除 zxing 依赖 |
+
+### 真机结果（B6000-F）
+
+- 首启 MultiDex 首次解压约 12s，之后冷启动 1s 内；无 FATAL。
+- 网络：`200 www.xingfan.cc/`、`200 cdn.04pic.com/...`；`HMTls: TLS 1.2 enabled, extra roots merged (SDK 19)`。
+- 首页：顶栏 5 个 Tab + 200dp 轮播（黑帮领地第二季）+ 6 列海报，图片全部出图。
+- 分类（558 页 / 13374 部）、榜单、更新（10 页 / 224 部）、详情页渲染正常。
+- 搜索：输入「繁花」出结果，键盘随输入框弹出，界面无"手机输入"按钮。
+- 播放《警之光第四季》第 01 集：起播、字幕、进度 00:50/58:21；倍速 1.0x→1.25x、
+  拖动到 41:49、竖屏/横屏切换、息屏再亮后继续播放均正常；该时段无
+  FATAL/ANR/MediaCodec 错误。
+- 《诡术》（2026 新片）播放页提示"播放源解析失败"，属该条线路失效，换片可播。
+
+### 未验证 / 待办
+
+- 5 分钟连续播放计时（HLS 与直链各一条）尚未在无人干扰下确认。
+- 方向键（旋钮/外接遥控）遍历、收藏增删、分页翻页未逐项回归。
+- Media3 在 4.4 上的长时间内存/温度表现未测。
+- 单元测试与 lint 只在整包状态下通过；拆分后的提交未单独复跑。
