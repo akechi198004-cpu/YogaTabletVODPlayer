@@ -1,0 +1,17 @@
+Four root certificates added to the platform store on API 19..23 builds.
+Same bundle the TouchIPTV app on this tablet already validates against.
+
+1. ISRG Root X1             (Let's Encrypt)   SHA-256 96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6
+2. ISRG Root X2             (Let's Encrypt)   SHA-256 69729B8E15A86EFC177A57AFB7171DFC64ADD28C2FCA8CF1507E34453CCB1470
+3. Amazon Root CA 1         (Amazon)          SHA-256 8ECDE6884F3D87B1125BA31AC3FCB13D7016DE7F57CC904FE1CB97C6AE98196E
+4. DigiCert Global Root G2  (DigiCert)        SHA-256 CB3CCBB76031E5E0138F8DD39A23F9DE47FFC35E43C1144CEA27D46A5AB1CB5F
+
+Original sources: https://letsencrypt.org/certs/isrgrootx1.pem,
+https://letsencrypt.org/certs/isrg-root-x2.pem,
+https://www.amazontrust.com/repository/AmazonRootCA1.pem,
+https://cacerts.digicert.com/DigiCertGlobalRootG2.crt.pem
+
+These only supplement the system store: LegacyTls asks the platform trust manager
+first and consults this bundle only when the platform rejects a chain. Certificate
+path validation and hostname verification stay enabled. Android 6 (API 23) and newer
+ship all four, so the file is unused there.

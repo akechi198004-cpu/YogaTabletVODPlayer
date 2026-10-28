@@ -2,11 +2,9 @@ package com.hm.video.ui
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.UiModeManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
@@ -78,7 +76,7 @@ class MainActivity : FocusAwareActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        tvMode = isTvDevice()
+        tvMode = usesLeanbackLayout()
         if (tvMode) listColumns = 6
 
         contentFrame = findViewById(R.id.content_frame)
@@ -163,12 +161,7 @@ class MainActivity : FocusAwareActivity() {
         super.onPause()
     }
 
-    fun isTvDevice(): Boolean {
-        val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
-        val isTelevision = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
-        val hasNoTouch = !packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
-        return isTelevision || hasNoTouch
-    }
+    private fun usesLeanbackLayout(): Boolean = DisplayProfile.isLeanbackLayout(this)
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         when (keyCode) {
@@ -233,6 +226,7 @@ class MainActivity : FocusAwareActivity() {
 
         Thread {
             val result = runCatching { XingfanRepository.getHome() }
+            result.exceptionOrNull()?.let { android.util.Log.e("HMNetwork", "home load failed", it) }
 
             mainHandler.post {
                 if (requestId != renderGeneration || currentTab != NavTab.HOME || isFinishing || isDestroyed) return@post

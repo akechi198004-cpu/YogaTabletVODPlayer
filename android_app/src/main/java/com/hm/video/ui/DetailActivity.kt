@@ -31,8 +31,7 @@ class DetailActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_detail)
-        tvMode = (getSystemService(UI_MODE_SERVICE) as? android.app.UiModeManager)?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION ||
-            !packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN)
+        tvMode = DisplayProfile.isLeanbackLayout(this)
         if (tvMode) applyTvLayout()
 
         detailUrl = intent.getStringExtra("url").orEmpty()
