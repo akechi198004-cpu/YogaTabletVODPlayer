@@ -1,5 +1,7 @@
 # HM影视
 
+> Yoga Tablet 8 独立副本（2026-10-29）：当前维护入口 YOGA_MAINTENANCE.md，构建入口 build-yoga.ps1。下文 LeTV 路径、旧会话分工及实机安装结果是源项目背景，不代表 Yoga 设备状态；当前仍为 minSdk 23 的未适配基线。
+
 本任务由用户指定一个执行 Agent和一个不落盘审计 Agent；目录统筹辅助只维护工程目录、仓库归属和交接。接手先读工作区 `../reports/AGENT_HANDOFF_20261024_CN.md` 并在会话确认角色；下文构建/验证命令供获准执行 Agent使用，不落盘审计 Agent不要运行。
 
 ## 当前说明入口
