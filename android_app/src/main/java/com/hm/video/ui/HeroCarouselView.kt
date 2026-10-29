@@ -65,17 +65,17 @@ class HeroCarouselView(
 
         val info = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(28), dp(16), dp(24), dp(16))
+            setPadding(dp(28), dp(8), dp(24), dp(8))
         }
         val badge = TextView(context).apply {
             text = "今日精选"
-            textSize = 16f
+            textSize = 14f
             setTextColor(Color.parseColor("#CBD8E9"))
-            setPadding(0, 0, 0, dp(4))
+            setPadding(0, 0, 0, dp(2))
         }
         info.addView(badge)
         title.apply {
-            textSize = 30f
+            textSize = 26f
             setTextColor(Color.WHITE)
             paint.isFakeBoldText = true
             maxLines = 1
@@ -83,19 +83,19 @@ class HeroCarouselView(
         }
         info.addView(title)
         meta.apply {
-            textSize = 18f
+            textSize = 15f
             setTextColor(Color.parseColor("#CFD8E5"))
-            setPadding(0, dp(4), 0, dp(8))
+            setPadding(0, dp(2), 0, dp(4))
         }
         info.addView(meta)
         info.addView(TextView(context).apply {
             text = "▶ 选集 / 播放"
-            textSize = 18f
+            textSize = 16f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(dp(20), 0, dp(20), 0)
+            setPadding(dp(16), 0, dp(16), 0)
             setBackgroundResource(R.drawable.bg_gradient_button)
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)))
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)))
         addView(info, LayoutParams(dp(760), LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.START))
 
         val controls = LinearLayout(context).apply {

@@ -102,11 +102,11 @@ class MainActivity : FocusAwareActivity() {
             val search = findViewById<Button>(R.id.btn_search)
             rootLayout.setBackgroundResource(R.drawable.bg_tv_backdrop)
             topBar.setBackgroundColor(Color.TRANSPARENT)
-            topBar.layoutParams.height = dp(72)
-            topBar.setPadding(dp(32), 0, dp(32), 0)
+            topBar.layoutParams.height = dp(60)
+            topBar.setPadding(dp(24), 0, dp(24), 0)
             title.text = "HM 影视"
-            title.textSize = 24f
-            title.layoutParams.width = dp(132)
+            title.textSize = 22f
+            title.layoutParams.width = dp(120)
             rootLayout.removeView(navBar)
             navBar.setBackgroundColor(Color.TRANSPARENT)
             // Fill the gap between the title and the search button instead of a fixed 490dp:
@@ -122,16 +122,16 @@ class MainActivity : FocusAwareActivity() {
                 marginEnd = dp(16)
             })
             navButtons.forEach { button ->
-                button.textSize = 20f
+                button.textSize = 17f
                 button.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
-                    setMargins(dp(3), 0, dp(3), 0)
+                    setMargins(dp(2), 0, dp(2), 0)
                 }
             }
             search.text = "搜索影视"
-            search.textSize = 18f
+            search.textSize = 16f
             search.layoutParams = (search.layoutParams as RelativeLayout.LayoutParams).apply {
-                width = dp(144)
-                height = dp(44)
+                width = dp(124)
+                height = dp(40)
             }
             btnHome.nextFocusLeftId = btnHome.id
             btnMine.nextFocusRightId = search.id
@@ -255,7 +255,7 @@ class MainActivity : FocusAwareActivity() {
                     ).apply {
                         nextFocusUpId = btnHome.id
                         layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
-                            (200 * density).toInt()).apply { bottomMargin = (8 * density).toInt() }
+                            (145 * density).toInt()).apply { bottomMargin = (6 * density).toInt() }
                     }
                     container.addView(heroCarousel)
                     btnHome.nextFocusDownId = heroCarousel!!.id
@@ -269,7 +269,7 @@ class MainActivity : FocusAwareActivity() {
                 val headingRow = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, ((if (tvMode) 8 else 16) * density).toInt(), 0, ((if (tvMode) 8 else 12) * density).toInt())
+                    setPadding(0, ((if (tvMode) 4 else 12) * density).toInt(), 0, ((if (tvMode) 4 else 8) * density).toInt())
                 }
 
                 val heading = TextView(this).apply {
@@ -1355,12 +1355,12 @@ class MainActivity : FocusAwareActivity() {
             val titleTv = TextView(this@MainActivity).apply {
                 text = item.title
                 setTextColor(Color.WHITE)
-                textSize = if (tvMode) 18f else 12f
+                textSize = if (tvMode) 16f else 12f
                 paint.isFakeBoldText = true
-                maxLines = if (tvMode) 2 else 1
-                minLines = if (tvMode) 2 else 1
+                maxLines = 1
+                minLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
-                setPadding(0, (6 * density).toInt(), 0, 0)
+                setPadding(0, ((if (tvMode) 4 else 6) * density).toInt(), 0, 0)
             }
             addView(titleTv)
 
@@ -1369,7 +1369,7 @@ class MainActivity : FocusAwareActivity() {
                 val subText = listOfNotNull(item.category, item.year).joinToString(" · ")
                 text = if (subText.isNotEmpty()) subText else (item.progress ?: "")
                 setTextColor(Color.parseColor("#9ca6b5"))
-                textSize = uiTextSize(10f)
+                textSize = if (tvMode) 12f else uiTextSize(10f)
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 setPadding(0, (2 * density).toInt(), 0, (2 * density).toInt())
@@ -1442,7 +1442,7 @@ class MainActivity : FocusAwareActivity() {
         if (tvMode) {
             setBackgroundColor(Color.TRANSPARENT)
             val density = resources.displayMetrics.density
-            setPadding((24 * density).toInt(), (8 * density).toInt(), (24 * density).toInt(), 0)
+            setPadding((16 * density).toInt(), (4 * density).toInt(), (16 * density).toInt(), 0)
         }
     }
 
