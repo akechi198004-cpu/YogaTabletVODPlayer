@@ -81,22 +81,29 @@ object MediaStreamProbe {
         client.newCall(request).execute().use { response ->
             val finalUrl = response.request().url()
             val contentType = response.header("Content-Type").orEmpty().lowercase()
-            if (isHlsType(contentType)) return MediaStreamKind.HLS
-            if (finalUrl.encodedPath().lowercase().endsWith(".m3u8")) return MediaStreamKind.HLS
-            val prefix = readPrefix(response.body()?.byteStream()) ?: return MediaStreamKind.UNKNOWN
-            if (isPlaylist(prefix)) return MediaStreamKind.HLS
-            if (contentType.startsWith("video/") || contentType.startsWith("audio/")) {
-                return MediaStreamKind.PROGRESSIVE
-            }
-            if (hasContainerSignature(prefix)) return MediaStreamKind.PROGRESSIVE
-            return MediaStreamKind.UNKNOWN
+            val prefix = readPrefix(response.body()?.byteStream()) ?: ByteArray(0)
+            return classifyResponse(contentType, finalUrl.toString(), prefix)
         }
+    }
+
+    /** Shared response classifier used by direct playback probing and the local proxy. */
+    internal fun classifyResponse(contentType: String, finalUrl: String, prefix: ByteArray): MediaStreamKind {
+        val normalizedType = contentType.lowercase()
+        // The manifest signature is the strongest evidence and resolves conflicting headers or
+        // extensions without mistaking a query parameter for a media path.
+        if (isPlaylistPrefix(prefix) || isHlsType(normalizedType)) return MediaStreamKind.HLS
+        if (normalizedType.startsWith("video/") || normalizedType.startsWith("audio/")) {
+            return MediaStreamKind.PROGRESSIVE
+        }
+        inferFromPath(finalUrl)?.let { return it }
+        if (hasContainerSignature(prefix)) return MediaStreamKind.PROGRESSIVE
+        return MediaStreamKind.UNKNOWN
     }
 
     private fun isHlsType(contentType: String): Boolean =
         contentType.contains("mpegurl") || contentType.contains("vnd.apple.mpegurl")
 
-    private fun isPlaylist(prefix: ByteArray): Boolean =
+    internal fun isPlaylistPrefix(prefix: ByteArray): Boolean =
         String(prefix, Charsets.UTF_8).trimStart('\uFEFF', ' ', '\n', '\r')
             .startsWith("#EXTM3U")
 

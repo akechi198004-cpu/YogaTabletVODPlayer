@@ -113,34 +113,49 @@ adb ... pm list features | grep touchscreen                   -> 存在 touchscr
 
 ### 1. 页面总时限覆盖正文
 
-- 页面客户端改用 OkHttp callTimeout=20s，覆盖 DNS、连接、响应头与正文读取；删除只在 call.execute() 返回前生效的手工计时器。
-- 新增 PageCallScope：executePageCall 在正文读完（use 关闭响应）后才释放 Call；同一 scope 的新请求或 cancel() 会取消上一条。MainActivity、DetailActivity、SearchActivity、PlayerActivity 各持一个 scope，切换/重载/销毁时取消。
-- XingfanRepository.fetchPageWithFinalUrl（解析服务请求）改走同一总时限与 scope，不再绕过。
-- 图片改用独立 imageHttpClient（保留原读超时，不继承 20s 总预算）；视频继续用 playbackHttpClient（无总预算）。
-- 本地测试 XingfanPageTimeoutTest 4 项：目录慢正文、解析服务慢正文、新请求取代旧 Call、scope 取消，均在 1 秒测试预算内中止。
+- 页面客户端使用 OkHttp `callTimeout=20s`，覆盖 DNS、连接、响应头和正文读取；解析服务请求也走同一限制。
+- `PageCallScope` 为前台页面请求提供取消范围；图片使用独立客户端，视频流保留独立长读超时。
+- 本地慢速正文测试覆盖目录请求和解析服务请求。
 
 ### 2. 进程回收后恢复当前剧集
 
-- PlayerActivity 保存并恢复：当前集 URL/标题/集号、作品页 URL、作品标题、海报、已加载集、播放位置、暂停意图、倍速、首次定位状态；线路直链（含签名参数）不进入 Bundle。
-- 恢复时 loadedEpisodeUrl 置为当前集，loadPlayInfo() 不会清空恢复位置；READY 时在 Bundle 位置与同一集历史进度间取较大值，避免回退。
-- 测试：
-ecreationRestoresTheEpisodeThatWasPlaying（第 2 集、1.5x、暂停恢复、位置取较新值、历史仍为第 2 集且进度未被覆盖）、savedStateNeverContainsSignedStreamLinks。
+- 保存/恢复当前集、位置、暂停意图和倍速；不保存签名播放直链。
+- 恢复时使用当前集历史与 Bundle 位置，避免恢复到初始集或覆盖另一集历史。
 
 ### 3. 音频焦点与耳机拔出
 
-- ExoPlayer 不接管焦点（handleAudioFocus=false），由 Activity 显式请求/放弃，并用 pplyPlayWhenReady() 统一决定是否播放。
-- 临时丢失焦点：暂停并标记可恢复，焦点恢复且仍在页面时继续；永久丢失：暂停并清除播放意图；耳机拔出（ACTION_AUDIO_BECOMING_NOISY）：暂停并清除播放意图，回到前台不自动起播；后台期间发生的自动暂停不会在回到前台时恢复。
-- 测试：临时丢失/恢复、丢失后进后台、永久丢失、拔耳机 4 项，以及自动暂停仍立即写入进度。
+- Activity 管理音频焦点和耳机拔出暂停，区分用户暂停、临时/永久焦点丢失；自动暂停不会在回前台时无条件起播。
 
-### 4. 无后缀/重定向 HLS 的类型识别
+### 4. 无后缀/重定向 HLS
 
-- 新增 MediaStreamProbe：.m3u8 之外不再凭地址猜测；对无已知扩展名的地址用 Range: bytes=0-1023 探测一次，依据 Content-Type、重定向后的最终地址、#EXTM3U 清单头、MP4/FLV 容器签名判定；无法判定为 UNKNOWN，不当作 HLS。
-- PlayerActivity 仅在识别为 HLS 时设置 APPLICATION_M3U8；仅 .mp4/.m4v 设置 VIDEO_MP4；未知类型不强制 MIME。
-- 代理重试把已识别的 HLS 以 kind=hls 传给 HlsLocalProxy，无后缀播放列表同样会被改写。
-- 测试：MediaStreamProbeTest 9 项（普通 HLS、无后缀 HLS 两种证据、重定向 HLS、普通 MP4、无后缀 MP4、查询含 .m3u8 的 MP4、未知响应、会话缓存）；PlayerActivityTest 4 项（查询含 .m3u8 的 MP4、普通 m3u8、无后缀 HLS 实探、未知不强制 HLS）。
+- 使用响应类型、最终地址和清单/容器特征判断媒体类型；未知地址不默认当 HLS。
+- 受控本地样例覆盖普通/无后缀/重定向 HLS、MP4 与查询参数含 `.m3u8` 的 MP4。
 
 ### 本轮结果与未验证
 
-- uild-yoga.ps1 通过：assembleDebug、testDebugUnitTest、lintDebug；84 项测试 0 失败/错误/跳过；lint 0 错误、133 警告（均在既有类别内）。
-- 上述验证均为 Robolectric/JVM 与本地受控 HTTP 服务，**不是 API 19 真机验收**。
-- 仍需真机确认：耳机插拔广播、其他应用抢占焦点的实际表现、进程被系统回收后从最近任务恢复、真实无后缀/重定向线路起播。
+- `build-yoga.ps1` 全通过：assembleDebug、testDebugUnitTest、lintDebug；84 项测试通过，lint 0 错误。
+- 验证为 Robolectric/JVM 与本地受控 HTTP，不是 API 19 真机验收。耳机/焦点事件、系统进程回收恢复和真实线路仍待真机确认。
+
+## 第六轮：三项遗漏修补（2026-10-29，基线 550fbc5）
+
+### 1. 请求取消代次竞态
+
+- `PageCallScope.newRequest()` 为每个前台操作签发代次 ticket；旧线程晚启动时会在发出网络请求前被拒绝，页面销毁会使所有旧 ticket 失效。
+- 一个 ticket 可顺序完成播放页与解析服务请求；缓存后台刷新明确使用无 ticket 的路径，不会取消前台 Call。过期操作在缓存写入前再次核验代次。
+- 测试以可控线程顺序覆盖旧任务晚启动、销毁后迟到注册，以及真实仓库 `scheduleRefresh` 与前台慢响应交错。
+
+### 2. 音频焦点申请失败
+
+- 播放条件现在要求用户播放意图、Activity 前台状态及成功获得音频焦点同时成立。申请失败时保留用户意图但保持暂停；生命周期返回不会自动重试失败申请，用户再次操作可重试。
+- Robolectric AudioManager 拒绝焦点申请的测试覆盖暂停、保留意图、前后台往返和迟到 GAIN 回调。
+
+### 3. 代理媒体判断与嵌套 HLS
+
+- 直接探测与 HLS 代理共用响应分类器；去掉对完整 URL 查询串 `.m3u8` 子串的判断。代理对未知/可能的清单检查非消费式响应前缀，MP4 字节保持原样。
+- 主清单仅对 `STREAM-INF`、媒体/iframe rendition 等子清单 URI 添加 HLS 提示；媒体分片与密钥不继承提示。无后缀子清单通过 `#EXTM3U` 识别后继续改写相对 URI。
+- 本地 socket/HTTP 测试实际执行代理响应处理：查询参数含 `.m3u8` 的 MP4 字节未改写；主清单→无后缀子清单→相对分片及密钥完整验证。
+
+### 本轮结果与未验证
+
+- `build-yoga.ps1` 全通过：assembleDebug、testDebugUnitTest、lintDebug；89 项测试通过，lint 0 错误（133 条警告）。
+- 测试均为 Robolectric/JVM 与本地受控服务，不是 API 19 真机验收。需在 B6000-F 验收真实焦点拒绝/恢复、页面切换时序及实际代理线路行为。

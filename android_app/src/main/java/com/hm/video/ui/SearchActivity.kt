@@ -181,7 +181,7 @@ class SearchActivity : Activity() {
         if (keyword.isEmpty()) return
         currentPage = page.coerceAtLeast(1)
         val requestId = ++searchRequestId
-        pageCallScope.cancel()
+        val ticket = pageCallScope.newRequest()
         val requestedCid = currentCid
         val requestedPage = currentPage
         val storage = HMVideoApplication.instance.storageManager
@@ -205,7 +205,7 @@ class SearchActivity : Activity() {
 
         Thread {
             try {
-                val res = XingfanRepository.search(keyword, requestedCid, requestedPage, scope = pageCallScope)
+                val res = XingfanRepository.search(keyword, requestedCid, requestedPage, ticket = ticket)
                 mainHandler.post {
                     if (requestId != searchRequestId || isFinishing || isDestroyed) return@post
                     currentPage = res.page

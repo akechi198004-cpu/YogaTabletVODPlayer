@@ -226,7 +226,10 @@ class MainActivity : FocusAwareActivity() {
             NavTab.CATEGORY -> renderCategoryTab()
             NavTab.TOP -> renderTopTab()
             NavTab.DAILY -> renderDailyTab()
-            NavTab.MINE -> renderMineTab()
+            NavTab.MINE -> {
+                pageCallScope.newRequest() // invalidate any list request before showing Mine
+                renderMineTab()
+            }
         }
     }
 
@@ -235,13 +238,13 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     private fun renderHomeTab() {
         val requestId = ++renderGeneration
-        pageCallScope.cancel()
+        val ticket = pageCallScope.newRequest()
         val root = createLoadingLayout("正在获取今日精选影视…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
 
         Thread {
-            val result = runCatching { XingfanRepository.getHome(scope = pageCallScope) }
+            val result = runCatching { XingfanRepository.getHome(ticket = ticket) }
             result.exceptionOrNull()?.let { android.util.Log.e("HMNetwork", "home load failed", it) }
 
             mainHandler.post {
@@ -421,7 +424,7 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     private fun renderCategoryTab(focusFirst: Boolean = false) {
         val requestId = ++renderGeneration
-        pageCallScope.cancel()
+        val ticket = pageCallScope.newRequest()
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
         val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取分类库作品…")
@@ -441,7 +444,7 @@ class MainActivity : FocusAwareActivity() {
         val requestedSort = currentFilterSort
         Thread {
             try {
-                val data = XingfanRepository.getCategoryList(effectiveCat, requestedPage, area = requestedArea, year = requestedYear, sort = requestedSort, scope = pageCallScope)
+                val data = XingfanRepository.getCategoryList(effectiveCat, requestedPage, area = requestedArea, year = requestedYear, sort = requestedSort, ticket = ticket)
                 mainHandler.post {
                     if (requestId != renderGeneration || currentTab != NavTab.CATEGORY || isFinishing || isDestroyed) return@post
                     val view = inflatePage()
@@ -861,7 +864,7 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     private fun renderTopTab() {
         val requestId = ++renderGeneration
-        pageCallScope.cancel()
+        val ticket = pageCallScope.newRequest()
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
         val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取全网影视榜单…")
@@ -869,7 +872,7 @@ class MainActivity : FocusAwareActivity() {
         contentFrame.addView(root)
 
         Thread {
-            val result = runCatching { XingfanRepository.getTopBoards(scope = pageCallScope) }
+            val result = runCatching { XingfanRepository.getTopBoards(ticket = ticket) }
 
             mainHandler.post {
                     if (requestId != renderGeneration || currentTab != NavTab.TOP || isFinishing || isDestroyed) return@post
@@ -959,7 +962,7 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     private fun renderDailyTab() {
         val requestId = ++renderGeneration
-        pageCallScope.cancel()
+        val ticket = pageCallScope.newRequest()
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
         val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取今日实时连载更新…")
@@ -967,7 +970,7 @@ class MainActivity : FocusAwareActivity() {
         contentFrame.addView(root)
 
         Thread {
-            val result = runCatching { XingfanRepository.getDailyUpdates(scope = pageCallScope) }
+            val result = runCatching { XingfanRepository.getDailyUpdates(ticket = ticket) }
 
             mainHandler.post {
                     if (requestId != renderGeneration || currentTab != NavTab.DAILY || isFinishing || isDestroyed) return@post

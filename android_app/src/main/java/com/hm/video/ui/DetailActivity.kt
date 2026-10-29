@@ -88,13 +88,13 @@ class DetailActivity : Activity() {
 
     private fun loadDetail(forceRefresh: Boolean = false) {
         val requestId = ++detailRequestId
-        pageCallScope.cancel()
+        val ticket = pageCallScope.newRequest()
         isDetailLoading = true
         detailLoadError = null
         currentDetail?.let(::renderDetail)
         Thread {
             try {
-                val detail = XingfanRepository.getDetail(detailUrl, forceRefresh, pageCallScope)
+                val detail = XingfanRepository.getDetail(detailUrl, forceRefresh, ticket)
                 mainHandler.post {
                     if (requestId != detailRequestId || isFinishing || isDestroyed) return@post
                     isDetailLoading = false

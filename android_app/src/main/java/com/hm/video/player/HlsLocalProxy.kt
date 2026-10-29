@@ -109,7 +109,7 @@ object HlsLocalProxy {
         return null
     }
 
-    private fun proxyRequest(
+    internal fun proxyRequest(
         socket: Socket,
         targetUrl: String,
         rangeHeader: String?,
@@ -127,11 +127,19 @@ object HlsLocalProxy {
                 val body = response.body()
                 val contentType = response.header("Content-Type").orEmpty()
                 val finalUrl = response.request().url().toString()
-                val isPlaylist = response.isSuccessful() && (
-                    contentType.contains("mpegurl", true) ||
-                        targetUrl.contains(".m3u8", true) ||
-                        hlsHint
-                    )
+                val finalPathKind = MediaStreamProbe.inferFromPath(finalUrl)
+                val progressiveMime = contentType.startsWith("video/", ignoreCase = true) ||
+                    contentType.startsWith("audio/", ignoreCase = true)
+                // Inspect a small, non-consuming prefix. Never inspect the query string: an MP4
+                // URL may legitimately contain a token ending in `.m3u8`.
+                val shouldInspectPrefix = hlsHint || finalPathKind == null ||
+                    contentType.contains("mpegurl", ignoreCase = true) ||
+                    (finalPathKind == MediaStreamKind.PROGRESSIVE && !progressiveMime)
+                val prefix = if (response.isSuccessful() && !progressiveMime && shouldInspectPrefix) {
+                    runCatching { response.peekBody(1024).bytes() }.getOrDefault(ByteArray(0))
+                } else ByteArray(0)
+                val isPlaylist = response.isSuccessful() &&
+                    MediaStreamProbe.classifyResponse(contentType, finalUrl, prefix) == MediaStreamKind.HLS
                 val output = BufferedOutputStream(socket.getOutputStream())
                 if (isPlaylist) {
                     val playlist = body?.string().orEmpty()
@@ -157,16 +165,30 @@ object HlsLocalProxy {
         } catch (_: Exception) { sendStatus(socket, 502, "Bad Gateway") }
     }
 
-    private fun rewriteM3u8(playlist: String, baseUrl: String, refererUrl: String?): String {
+    internal fun rewriteM3u8(playlist: String, baseUrl: String, refererUrl: String?): String {
         val base = URL(baseUrl)
+        var nextUriIsPlaylist = false
         return playlist.lineSequence().joinToString("\n") { line ->
             val trimmed = line.trim()
-            if (trimmed.isEmpty() || trimmed.startsWith("#") && !trimmed.contains("URI=\"")) trimmed
-            else if (trimmed.startsWith("#")) Regex("URI=\"([^\"]+)\"").replace(trimmed) { match ->
-                val resolved = URL(base, match.groupValues[1]).toString()
-                "URI=\"${getProxyUrl(resolved, refererUrl)}\""
+            if (trimmed.isEmpty()) {
+                trimmed
+            } else if (trimmed.startsWith("#")) {
+                val upper = trimmed.uppercase()
+                if (upper.startsWith("#EXT-X-STREAM-INF")) nextUriIsPlaylist = true
+                val uriIsPlaylist = upper.startsWith("#EXT-X-MEDIA:") ||
+                    upper.startsWith("#EXT-X-I-FRAME-STREAM-INF:")
+                val isKey = upper.startsWith("#EXT-X-KEY:") || upper.startsWith("#EXT-X-SESSION-KEY:")
+                if (trimmed.contains("URI=\"")) Regex("URI=\"([^\"]+)\"").replace(trimmed) { match ->
+                    val resolved = URL(base, match.groupValues[1]).toString()
+                    val proxyUrl = getProxyUrl(resolved, refererUrl, hls = uriIsPlaylist && !isKey)
+                    "URI=\"$proxyUrl\""
+                } else trimmed
+            } else {
+                val resolved = URL(base, trimmed).toString()
+                val proxyUrl = getProxyUrl(resolved, refererUrl, hls = nextUriIsPlaylist)
+                nextUriIsPlaylist = false
+                proxyUrl
             }
-            else getProxyUrl(URL(base, trimmed).toString(), refererUrl)
         }
     }
 

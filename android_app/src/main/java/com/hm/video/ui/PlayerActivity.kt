@@ -92,6 +92,10 @@ class PlayerActivity : Activity() {
     private var audioManager: AudioManager? = null
     /** True while playback is held back because another app owns audio focus. */
     private var audioFocusLost = false
+    /** Only a successful focus request (or return from our own transient loss) permits playback. */
+    private var audioFocusGranted = false
+    /** Do not retry a denied request automatically on a later lifecycle transition. */
+    private var audioFocusRequestFailed = false
     /** Only a transient loss resumes on its own, and only while this screen is started. */
     private var resumeOnFocusGain = false
     private var noisyReceiverRegistered = false
@@ -163,6 +167,7 @@ class PlayerActivity : Activity() {
         outState.putLong(KEY_POSITION_MS, maxOf(exoPlayer?.currentPosition ?: 0L, resumePositionMs ?: 0L))
         // An auto-pause (focus loss, unplugged headset) must not become an auto-play on restore.
         outState.putBoolean(KEY_PLAY_REQUESTED, playRequested && !audioFocusLost)
+        outState.putBoolean(KEY_FOCUS_REQUEST_FAILED, audioFocusRequestFailed)
         outState.putBoolean(KEY_INITIAL_SEEK_DONE, initialSeekApplied)
     }
 
@@ -190,6 +195,7 @@ class PlayerActivity : Activity() {
         val position = state.getLong(KEY_POSITION_MS, 0L)
         if (position > 0L) resumePositionMs = position
         playRequested = state.getBoolean(KEY_PLAY_REQUESTED, playRequested)
+        audioFocusRequestFailed = state.getBoolean(KEY_FOCUS_REQUEST_FAILED, false)
         initialSeekApplied = state.getBoolean(KEY_INITIAL_SEEK_DONE, false)
     }
 
@@ -430,7 +436,7 @@ class PlayerActivity : Activity() {
         }
         val generation = ++loadGeneration
         streamGeneration++
-        pageCallScope.cancel()
+        val ticket = pageCallScope.newRequest()
         lineProbe?.cancel()
         lineProbe = null
         lineOrder = emptyList()
@@ -459,7 +465,7 @@ class PlayerActivity : Activity() {
 
         Thread {
             try {
-                val info = XingfanRepository.getPlayInfo(targetEpisodeUrl, forceRefresh, pageCallScope)
+                val info = XingfanRepository.getPlayInfo(targetEpisodeUrl, forceRefresh, ticket)
                 mainHandler.post {
                     if (generation != loadGeneration || isFinishing || isDestroyed) return@post
                     if (info.lines.isEmpty()) {
@@ -665,6 +671,8 @@ class PlayerActivity : Activity() {
         }
         applyPlayWhenReady()
         if (!play) {
+            audioFocusGranted = false
+            audioFocusRequestFailed = false
             saveProgress(force = true)
             abandonAudioFocus()
         }
@@ -672,15 +680,22 @@ class PlayerActivity : Activity() {
 
     /** The only place that turns user intent into playWhenReady, so pause reasons stay explicit. */
     private fun applyPlayWhenReady() {
-        exoPlayer?.playWhenReady = activityStarted && playRequested && !audioFocusLost
+        exoPlayer?.playWhenReady = activityStarted && playRequested && audioFocusGranted && !audioFocusLost
     }
 
-    private fun requestAudioFocus() {
-        audioManager?.requestAudioFocus(
+    private fun requestAudioFocus(): Boolean {
+        val result = audioManager?.requestAudioFocus(
             audioFocusListener,
             AudioManager.STREAM_MUSIC,
             AudioManager.AUDIOFOCUS_GAIN
-        )
+        ) ?: AudioManager.AUDIOFOCUS_REQUEST_FAILED
+        audioFocusGranted = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        audioFocusRequestFailed = !audioFocusGranted
+        if (!audioFocusGranted) {
+            audioFocusLost = false
+            resumeOnFocusGain = false
+        }
+        return audioFocusGranted
     }
 
     private fun abandonAudioFocus() {
@@ -695,6 +710,8 @@ class PlayerActivity : Activity() {
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 audioFocusLost = true
+                audioFocusGranted = false
+                audioFocusRequestFailed = false
                 resumeOnFocusGain = false
                 playRequested = false
                 exoPlayer?.volume = 1f
@@ -704,6 +721,7 @@ class PlayerActivity : Activity() {
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 audioFocusLost = true
+                audioFocusGranted = false
                 resumeOnFocusGain = true
                 applyPlayWhenReady()
                 saveProgress(force = true)
@@ -714,12 +732,13 @@ class PlayerActivity : Activity() {
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 exoPlayer?.volume = 1f
-                if (resumeOnFocusGain && activityStarted) {
+                if (resumeOnFocusGain) {
                     resumeOnFocusGain = false
                     audioFocusLost = false
-                    if (playRequested) requestAudioFocus()
-                    applyPlayWhenReady()
+                    audioFocusGranted = true
                 }
+                // A stray GAIN callback cannot turn a previously denied request into playback.
+                if (!audioFocusRequestFailed) applyPlayWhenReady()
                 syncPlaybackButton()
             }
         }
@@ -729,9 +748,12 @@ class PlayerActivity : Activity() {
     private fun handleBecomingNoisy() {
         playRequested = false
         audioFocusLost = false
+        audioFocusGranted = false
+        audioFocusRequestFailed = false
         resumeOnFocusGain = false
         applyPlayWhenReady()
         saveProgress(force = true)
+        abandonAudioFocus()
         syncPlaybackButton()
     }
 
@@ -826,6 +848,7 @@ class PlayerActivity : Activity() {
         if (audioFocusLost) playRequested = false
         audioFocusLost = false
         resumeOnFocusGain = false
+        audioFocusGranted = false
         unregisterNoisyReceiver()
         abandonAudioFocus()
         super.onStop()
@@ -835,7 +858,7 @@ class PlayerActivity : Activity() {
         super.onStart()
         activityStarted = true
         registerNoisyReceiver()
-        if (playRequested) requestAudioFocus()
+        if (playRequested && !audioFocusRequestFailed) requestAudioFocus()
         applyPlayWhenReady()
         syncPlaybackButton()
     }
@@ -925,6 +948,7 @@ class PlayerActivity : Activity() {
         const val KEY_SPEED = "hm.player.speed"
         const val KEY_POSITION_MS = "hm.player.position_ms"
         const val KEY_PLAY_REQUESTED = "hm.player.play_requested"
+        const val KEY_FOCUS_REQUEST_FAILED = "hm.player.focus_request_failed"
         const val KEY_INITIAL_SEEK_DONE = "hm.player.initial_seek_done"
     }
 }

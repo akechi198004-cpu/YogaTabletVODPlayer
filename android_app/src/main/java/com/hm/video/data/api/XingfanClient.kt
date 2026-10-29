@@ -84,23 +84,23 @@ object XingfanClient {
         pageClientBuilder().callTimeout(seconds, TimeUnit.SECONDS).build()
 
     /**
-     * Executes [call] under [scope] and reads the response inside [read], so the scope keeps
-     * pointing at this call until the body has been consumed. Releasing it right after
-     * `execute()` would make the headers cancellable but leave a slow body uncancellable, which
-     * is the same blind spot the old deadline had. The 20-second whole-call timeout still applies.
+     * Executes [call] for one user action and reads the response inside [read], so the ticket
+     * stays bound to this call until the body has been consumed. A ticket from a superseded
+     * action is refused before the request starts, which keeps late threads from cancelling a
+     * newer request. The 20-second whole-call timeout still applies.
      */
     fun <T> executePageCall(
         call: Call,
-        scope: PageCallScope? = null,
+        ticket: PageCallScope.Ticket? = null,
         read: (okhttp3.Response) -> T
     ): T {
-        scope?.begin(call)
+        ticket?.claim(call)
         try {
             call.execute().use { response ->
                 return read(response)
             }
         } finally {
-            scope?.end(call)
+            ticket?.release(call)
         }
     }
 
@@ -120,8 +120,8 @@ object XingfanClient {
     )
 
     @Throws(IOException::class)
-    fun fetchPage(url: String, referer: String? = null, scope: PageCallScope? = null): String {
-        val response = fetchPageWithValidators(url, referer, scope = scope)
+    fun fetchPage(url: String, referer: String? = null, ticket: PageCallScope.Ticket? = null): String {
+        val response = fetchPageWithValidators(url, referer, ticket = ticket)
         return response.html ?: ""
     }
 
@@ -136,7 +136,7 @@ object XingfanClient {
         referer: String? = null,
         etag: String? = null,
         lastModified: String? = null,
-        scope: PageCallScope? = null,
+        ticket: PageCallScope.Ticket? = null,
         client: OkHttpClient = pageClient()
     ): PageResponse {
         val targetUrl = absUrl(url)
@@ -148,7 +148,7 @@ object XingfanClient {
         if (!etag.isNullOrEmpty()) requestBuilder.header("If-None-Match", etag)
         if (!lastModified.isNullOrEmpty()) requestBuilder.header("If-Modified-Since", lastModified)
 
-        return executePageCall(client.newCall(requestBuilder.build()), scope) { response ->
+        return executePageCall(client.newCall(requestBuilder.build()), ticket) { response ->
             if (response.code() == 304) {
                 PageResponse(
                     html = null,

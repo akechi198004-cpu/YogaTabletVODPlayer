@@ -63,6 +63,8 @@ class PlayerActivityTest {
             PlayLine("线路二", "https://example.invalid/b.m3u8")
         )))
         set("activityStarted", true)
+        set("audioManager", activity.getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager)
+        set("audioFocusGranted", true) // These tests bypass onCreate/onStart and model granted focus.
     }
 
     @After
@@ -274,6 +276,36 @@ class PlayerActivityTest {
 
         call("handleAudioFocusChange", AudioManager.AUDIOFOCUS_GAIN)
         assertTrue(fake.playWhenReady)
+    }
+
+    @Test
+    fun deniedAudioFocusKeepsPlaybackPausedAndDoesNotAutoplayOnReturn() {
+        val manager = activity.getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
+        shadowOf(manager).setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_FAILED)
+
+        call("requestPlayback", true)
+
+        assertEquals("the user's play intent is retained", true, get("playRequested"))
+        assertEquals(false, get("audioFocusGranted"))
+        assertEquals(true, get("audioFocusRequestFailed"))
+        assertFalse("a denied focus request must prevent start", fake.playWhenReady)
+        val savedState = android.os.Bundle()
+        call("onSaveInstanceState", savedState)
+        assertTrue("denied focus must remain blocked after recreation", savedState.getBoolean("hm.player.focus_request_failed"))
+
+        val (restored, restoredFake) = recreateWith(savedState)
+        callOn(restored, "onStart")
+        assertFalse("recreated activity must not auto-start after a denied request", restoredFake.playWhenReady)
+        callOn(restored, "onStop")
+        callOn(restored, "onDestroy")
+
+        call("onStop")
+        call("onStart") // denied focus is not retried automatically by lifecycle restoration
+        assertFalse(fake.playWhenReady)
+
+        call("handleAudioFocusChange", AudioManager.AUDIOFOCUS_GAIN)
+        assertFalse("a stray gain callback must not turn denial into playback", fake.playWhenReady)
+        assertEquals(true, get("playRequested"))
     }
 
     @Test

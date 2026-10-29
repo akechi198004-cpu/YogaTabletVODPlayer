@@ -118,9 +118,11 @@ class CatalogCacheGuardTest {
         val resultConstructor = XingfanRepository::class.java.declaredClasses
             .first { it.simpleName == "NetworkResult" }.declaredConstructors
             .first { it.parameterCount == 4 }.apply { isAccessible = true }
-        val fetch: (String?, String?) -> Any = { _, _ -> resultConstructor.newInstance(value, null, null, false) }
+        val fetch: (String?, String?, PageCallScope.Ticket?) -> Any = { _, _, _ ->
+            resultConstructor.newInstance(value, null, null, false)
+        }
         val method = XingfanRepository::class.java.declaredMethods.first { it.name == "loadWithCache" }
             .apply { isAccessible = true }
-        return method.invoke(XingfanRepository, memory, "guard", type, CachePolicy.SEARCH, force, shouldCache, fetch) as PageResult
+        return method.invoke(XingfanRepository, memory, "guard", type, CachePolicy.SEARCH, force, null, shouldCache, fetch) as PageResult
     }
 }
