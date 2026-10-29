@@ -109,10 +109,17 @@ class MainActivity : FocusAwareActivity() {
             title.layoutParams.width = dp(132)
             rootLayout.removeView(navBar)
             navBar.setBackgroundColor(Color.TRANSPARENT)
-            topBar.addView(navBar, RelativeLayout.LayoutParams(dp(490), dp(48)).apply {
+            // Fill the gap between the title and the search button instead of a fixed 490dp:
+            // the same code then fits both landscape (960dp) and portrait (600dp) without
+            // re-laying out on rotation, which configChanges would otherwise skip.
+            topBar.addView(navBar, RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.MATCH_PARENT, dp(48)
+            ).apply {
                 addRule(RelativeLayout.END_OF, R.id.app_title)
+                addRule(RelativeLayout.START_OF, R.id.btn_search)
                 addRule(RelativeLayout.CENTER_VERTICAL)
                 marginStart = dp(16)
+                marginEnd = dp(16)
             })
             navButtons.forEach { button ->
                 button.textSize = 20f
