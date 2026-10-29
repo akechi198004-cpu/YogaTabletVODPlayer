@@ -41,7 +41,6 @@ class PlayerActivity : Activity() {
     private lateinit var timeDisplay: TextView
     private lateinit var btnPlayPause: ImageButton
     private lateinit var btnSpeed: Button
-    private var btnOrientation: Button? = null
     private var btnTopOrientation: Button? = null
     private lateinit var loadingLayout: View
     private lateinit var resumeToast: TextView
@@ -111,7 +110,6 @@ class PlayerActivity : Activity() {
         episodeNo = intent.getIntExtra("episode_no", 1).coerceAtLeast(1)
         initViews()
         if (tvMode) {
-            btnOrientation?.visibility = View.GONE
             btnTopOrientation?.visibility = View.GONE
         }
         initPlayer()
@@ -156,7 +154,6 @@ class PlayerActivity : Activity() {
         timeDisplay = findViewById(R.id.player_time_display)
         btnPlayPause = findViewById(R.id.player_btn_play_pause)
         btnSpeed = findViewById(R.id.player_btn_speed)
-        btnOrientation = findViewById(R.id.player_btn_orientation)
         btnTopOrientation = findViewById(R.id.player_btn_top_orientation)
         loadingLayout = findViewById(R.id.player_loading_layout)
         resumeToast = findViewById(R.id.player_resume_toast)
@@ -174,7 +171,6 @@ class PlayerActivity : Activity() {
             exoPlayer?.playbackParameters = PlaybackParameters(currentSpeed)
         }
         findViewById<Button>(R.id.player_btn_next_ep).setOnClickListener { playNextEpisodeIfAvailable() }
-        btnOrientation?.setOnClickListener { toggleOrientation() }
         btnTopOrientation?.setOnClickListener { toggleOrientation() }
         updateOrientationUI(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
 
@@ -315,7 +311,6 @@ class PlayerActivity : Activity() {
 
     private fun updateOrientationUI(isLandscape: Boolean) {
         val label = if (isLandscape) "📱 竖屏" else "🔄 横屏"
-        btnOrientation?.text = label
         btnTopOrientation?.text = label
         window.decorView.systemUiVisibility = if (isLandscape) (
             View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or

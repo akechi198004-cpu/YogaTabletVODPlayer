@@ -199,17 +199,40 @@
 
                 <TextView
                     android:id="@+id/player_time_display"
-                    android:layout_width="0dp"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
                     android:text="00:00 / 00:00"
                     android:textColor="@color/text_white"
                     android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- Source switching stays left; playback actions stay right on the same row. -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <HorizontalScrollView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="8dp"
+                    android:scrollbars="none">
+
+                    <LinearLayout
+                        android:id="@+id/player_lines_row"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal" />
+                </HorizontalScrollView>
 
                 <Button
                     android:id="@+id/player_btn_speed"
                     android:layout_width="wrap_content"
                     android:layout_height="40dp"
+                    android:nextFocusUp="@id/player_seekbar"
                     android:background="@drawable/bg_pill"
                     android:text="1.0x"
                     android:textColor="@color/accent_cyan"
@@ -222,6 +245,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="40dp"
                     android:layout_marginStart="8dp"
+                    android:nextFocusUp="@id/player_seekbar"
                     android:background="@drawable/bg_pill"
                     android:text="下一集"
                     android:textColor="@color/text_white"
@@ -229,32 +253,7 @@
                     android:paddingStart="14dp"
                     android:paddingEnd="14dp" />
 
-                <Button
-                    android:id="@+id/player_btn_orientation"
-                    android:layout_width="wrap_content"
-                    android:layout_height="40dp"
-                    android:layout_marginStart="8dp"
-                    android:background="@drawable/bg_pill"
-                    android:text="🔄 横屏"
-                    android:textColor="@color/accent_cyan"
-                    android:textSize="13sp"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp" />
             </LinearLayout>
-
-            <!-- Line Selectors & Episode Quick Select -->
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:scrollbars="none">
-
-                <LinearLayout
-                    android:id="@+id/player_lines_row"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal" />
-            </HorizontalScrollView>
         </LinearLayout>
     </RelativeLayout>
 </RelativeLayout>
