@@ -108,3 +108,39 @@ adb ... pm list features | grep touchscreen                   -> 存在 touchscr
 - 线路切换移至底部栏左侧的横向滚动区；倍速与“下一集”固定在同一行右侧。移除重复的底部方向按钮，只保留顶部竖屏/横屏切换。
 - `build-yoga.ps1` 完整通过并安装到 B6000-F。真机 1280×800 播放页确认四个线路入口在左、倍速和下一集在右，单行显示且无重叠；截图 `.build_cache/shots/49-bottomrow-player.png`。
 - 本轮只验证了布局和真实播放器页面显示；线路切换后的起播与 HLS/直链长播仍待单独验收。
+
+## 第五轮：四项隐患修补（2026-10-29，基线 a6106e6）
+
+### 1. 页面总时限覆盖正文
+
+- 页面客户端改用 OkHttp callTimeout=20s，覆盖 DNS、连接、响应头与正文读取；删除只在 call.execute() 返回前生效的手工计时器。
+- 新增 PageCallScope：executePageCall 在正文读完（use 关闭响应）后才释放 Call；同一 scope 的新请求或 cancel() 会取消上一条。MainActivity、DetailActivity、SearchActivity、PlayerActivity 各持一个 scope，切换/重载/销毁时取消。
+- XingfanRepository.fetchPageWithFinalUrl（解析服务请求）改走同一总时限与 scope，不再绕过。
+- 图片改用独立 imageHttpClient（保留原读超时，不继承 20s 总预算）；视频继续用 playbackHttpClient（无总预算）。
+- 本地测试 XingfanPageTimeoutTest 4 项：目录慢正文、解析服务慢正文、新请求取代旧 Call、scope 取消，均在 1 秒测试预算内中止。
+
+### 2. 进程回收后恢复当前剧集
+
+- PlayerActivity 保存并恢复：当前集 URL/标题/集号、作品页 URL、作品标题、海报、已加载集、播放位置、暂停意图、倍速、首次定位状态；线路直链（含签名参数）不进入 Bundle。
+- 恢复时 loadedEpisodeUrl 置为当前集，loadPlayInfo() 不会清空恢复位置；READY 时在 Bundle 位置与同一集历史进度间取较大值，避免回退。
+- 测试：
+ecreationRestoresTheEpisodeThatWasPlaying（第 2 集、1.5x、暂停恢复、位置取较新值、历史仍为第 2 集且进度未被覆盖）、savedStateNeverContainsSignedStreamLinks。
+
+### 3. 音频焦点与耳机拔出
+
+- ExoPlayer 不接管焦点（handleAudioFocus=false），由 Activity 显式请求/放弃，并用 pplyPlayWhenReady() 统一决定是否播放。
+- 临时丢失焦点：暂停并标记可恢复，焦点恢复且仍在页面时继续；永久丢失：暂停并清除播放意图；耳机拔出（ACTION_AUDIO_BECOMING_NOISY）：暂停并清除播放意图，回到前台不自动起播；后台期间发生的自动暂停不会在回到前台时恢复。
+- 测试：临时丢失/恢复、丢失后进后台、永久丢失、拔耳机 4 项，以及自动暂停仍立即写入进度。
+
+### 4. 无后缀/重定向 HLS 的类型识别
+
+- 新增 MediaStreamProbe：.m3u8 之外不再凭地址猜测；对无已知扩展名的地址用 Range: bytes=0-1023 探测一次，依据 Content-Type、重定向后的最终地址、#EXTM3U 清单头、MP4/FLV 容器签名判定；无法判定为 UNKNOWN，不当作 HLS。
+- PlayerActivity 仅在识别为 HLS 时设置 APPLICATION_M3U8；仅 .mp4/.m4v 设置 VIDEO_MP4；未知类型不强制 MIME。
+- 代理重试把已识别的 HLS 以 kind=hls 传给 HlsLocalProxy，无后缀播放列表同样会被改写。
+- 测试：MediaStreamProbeTest 9 项（普通 HLS、无后缀 HLS 两种证据、重定向 HLS、普通 MP4、无后缀 MP4、查询含 .m3u8 的 MP4、未知响应、会话缓存）；PlayerActivityTest 4 项（查询含 .m3u8 的 MP4、普通 m3u8、无后缀 HLS 实探、未知不强制 HLS）。
+
+### 本轮结果与未验证
+
+- uild-yoga.ps1 通过：assembleDebug、testDebugUnitTest、lintDebug；84 项测试 0 失败/错误/跳过；lint 0 错误、133 警告（均在既有类别内）。
+- 上述验证均为 Robolectric/JVM 与本地受控 HTTP 服务，**不是 API 19 真机验收**。
+- 仍需真机确认：耳机插拔广播、其他应用抢占焦点的实际表现、进程被系统回收后从最近任务恢复、真实无后缀/重定向线路起播。

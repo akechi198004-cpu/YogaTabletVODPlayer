@@ -17,6 +17,7 @@ import android.widget.*
 import com.hm.video.HMVideoApplication
 import com.hm.video.R
 import com.hm.video.data.api.XingfanConfig
+import com.hm.video.data.api.PageCallScope
 import com.hm.video.data.api.XingfanRepository
 import com.hm.video.data.model.*
 import com.hm.video.util.ImageLoader
@@ -34,6 +35,7 @@ class MainActivity : FocusAwareActivity() {
     private var lastCategoryFocusKey = "main:movie"
     private val categoryFocusIds = mutableMapOf<String, Int>()
     private var renderGeneration = 0
+    private val pageCallScope = PageCallScope()
     private var heroCarousel: HeroCarouselView? = null
     private var heroIndex = 0
 
@@ -168,6 +170,12 @@ class MainActivity : FocusAwareActivity() {
         super.onPause()
     }
 
+    override fun onDestroy() {
+        pageCallScope.cancel()
+        mainHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
+    }
+
     private fun usesLeanbackLayout(): Boolean = DisplayProfile.isLeanbackLayout(this)
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -227,12 +235,13 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     private fun renderHomeTab() {
         val requestId = ++renderGeneration
+        pageCallScope.cancel()
         val root = createLoadingLayout("正在获取今日精选影视…")
         contentFrame.removeAllViews()
         contentFrame.addView(root)
 
         Thread {
-            val result = runCatching { XingfanRepository.getHome() }
+            val result = runCatching { XingfanRepository.getHome(scope = pageCallScope) }
             result.exceptionOrNull()?.let { android.util.Log.e("HMNetwork", "home load failed", it) }
 
             mainHandler.post {
@@ -412,6 +421,7 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     private fun renderCategoryTab(focusFirst: Boolean = false) {
         val requestId = ++renderGeneration
+        pageCallScope.cancel()
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
         val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取分类库作品…")
@@ -431,7 +441,7 @@ class MainActivity : FocusAwareActivity() {
         val requestedSort = currentFilterSort
         Thread {
             try {
-                val data = XingfanRepository.getCategoryList(effectiveCat, requestedPage, area = requestedArea, year = requestedYear, sort = requestedSort)
+                val data = XingfanRepository.getCategoryList(effectiveCat, requestedPage, area = requestedArea, year = requestedYear, sort = requestedSort, scope = pageCallScope)
                 mainHandler.post {
                     if (requestId != renderGeneration || currentTab != NavTab.CATEGORY || isFinishing || isDestroyed) return@post
                     val view = inflatePage()
@@ -851,6 +861,7 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     private fun renderTopTab() {
         val requestId = ++renderGeneration
+        pageCallScope.cancel()
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
         val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取全网影视榜单…")
@@ -858,7 +869,7 @@ class MainActivity : FocusAwareActivity() {
         contentFrame.addView(root)
 
         Thread {
-            val result = runCatching { XingfanRepository.getTopBoards() }
+            val result = runCatching { XingfanRepository.getTopBoards(scope = pageCallScope) }
 
             mainHandler.post {
                     if (requestId != renderGeneration || currentTab != NavTab.TOP || isFinishing || isDestroyed) return@post
@@ -948,6 +959,7 @@ class MainActivity : FocusAwareActivity() {
     // -------------------------------------------------------------
     private fun renderDailyTab() {
         val requestId = ++renderGeneration
+        pageCallScope.cancel()
         val focusBeforeId = currentFocus?.id ?: View.NO_ID
         val focusToken = beginFocusLoad()
         val root = createLoadingLayout("正在获取今日实时连载更新…")
@@ -955,7 +967,7 @@ class MainActivity : FocusAwareActivity() {
         contentFrame.addView(root)
 
         Thread {
-            val result = runCatching { XingfanRepository.getDailyUpdates() }
+            val result = runCatching { XingfanRepository.getDailyUpdates(scope = pageCallScope) }
 
             mainHandler.post {
                     if (requestId != renderGeneration || currentTab != NavTab.DAILY || isFinishing || isDestroyed) return@post

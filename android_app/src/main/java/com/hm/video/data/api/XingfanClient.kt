@@ -1,19 +1,19 @@
 package com.hm.video.data.api
 
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.HttpUrl
 import okhttp3.Request
 import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.Executors
 
 /** Thrown for non-success HTTP responses so callers can tell "gone" from "network down". */
 class HttpStatusException(val code: Int, message: String) : IOException(message)
 
 object XingfanClient {
 
-    private fun createHttpClient(): OkHttpClient = OkHttpClient.Builder()
+    private fun pageClientBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
         .apply { com.hm.video.util.LegacyTls.configure(this) }
         .addInterceptor { chain ->
             val target = chain.request().url()
@@ -31,17 +31,25 @@ object XingfanClient {
         .writeTimeout(XingfanConfig.FETCH_TIMEOUT_SEC, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
-        .build()
 
     const val PAGE_CALL_TIMEOUT_SEC = 20L
-    private val deadlineExecutor = Executors.newSingleThreadScheduledExecutor { runnable -> Thread(runnable, "hm-http-deadline").apply { isDaemon = true } }
 
-    fun executePageCall(call: okhttp3.Call): okhttp3.Response {
-        val timeout = deadlineExecutor.schedule({ call.cancel() }, PAGE_CALL_TIMEOUT_SEC, TimeUnit.SECONDS)
-        try { return call.execute() } finally { timeout.cancel(false) }
-    }
+    /**
+     * Page client: [OkHttpClient.callTimeout] bounds the whole call, including reading the
+     * response body. The previous implementation cancelled a timer as soon as the headers
+     * arrived, so a server that answered quickly and then dripped its body escaped the limit.
+     */
+    private fun createHttpClient(): OkHttpClient = pageClientBuilder()
+        .callTimeout(PAGE_CALL_TIMEOUT_SEC, TimeUnit.SECONDS)
+        .build()
 
     val httpClient: OkHttpClient = createHttpClient()
+
+    /**
+     * Posters keep the per-read timeout and no whole-call budget: a large image on a slow
+     * connection must not inherit the page request deadline.
+     */
+    val imageHttpClient: OkHttpClient = pageClientBuilder().build()
 
     // Media segments are streamed for much longer than HTML pages. Keep a separate client
     // so a slow TV box or CDN does not hit the short page-fetch timeout mid-playback.
@@ -51,6 +59,50 @@ object XingfanClient {
         .writeTimeout(20, TimeUnit.SECONDS)
         .callTimeout(0, TimeUnit.MILLISECONDS)
         .build()
+
+    /** Media-type sniffing reads only a prefix; keep it short so start-up stays responsive. */
+    val probeHttpClient: OkHttpClient = playbackHttpClient.newBuilder()
+        .callTimeout(10, TimeUnit.SECONDS)
+        .build()
+
+    @Volatile
+    private var pageClientOverride: OkHttpClient? = null
+
+    /** The page client used by every HTML/service fetch; tests may swap in a short deadline. */
+    internal fun pageClient(): OkHttpClient = pageClientOverride ?: httpClient
+
+    internal fun <T> withPageClientForTest(client: OkHttpClient, block: () -> T): T {
+        synchronized(this) { pageClientOverride = client }
+        try {
+            return block()
+        } finally {
+            synchronized(this) { pageClientOverride = null }
+        }
+    }
+
+    internal fun pageClientWithCallTimeoutForTest(seconds: Long): OkHttpClient =
+        pageClientBuilder().callTimeout(seconds, TimeUnit.SECONDS).build()
+
+    /**
+     * Executes [call] under [scope] and reads the response inside [read], so the scope keeps
+     * pointing at this call until the body has been consumed. Releasing it right after
+     * `execute()` would make the headers cancellable but leave a slow body uncancellable, which
+     * is the same blind spot the old deadline had. The 20-second whole-call timeout still applies.
+     */
+    fun <T> executePageCall(
+        call: Call,
+        scope: PageCallScope? = null,
+        read: (okhttp3.Response) -> T
+    ): T {
+        scope?.begin(call)
+        try {
+            call.execute().use { response ->
+                return read(response)
+            }
+        } finally {
+            scope?.end(call)
+        }
+    }
 
     fun absUrl(path: String): String {
         if (path.startsWith("http://") || path.startsWith("https://")) return path
@@ -68,8 +120,8 @@ object XingfanClient {
     )
 
     @Throws(IOException::class)
-    fun fetchPage(url: String, referer: String? = null): String {
-        val response = fetchPageWithValidators(url, referer)
+    fun fetchPage(url: String, referer: String? = null, scope: PageCallScope? = null): String {
+        val response = fetchPageWithValidators(url, referer, scope = scope)
         return response.html ?: ""
     }
 
@@ -83,7 +135,9 @@ object XingfanClient {
         url: String,
         referer: String? = null,
         etag: String? = null,
-        lastModified: String? = null
+        lastModified: String? = null,
+        scope: PageCallScope? = null,
+        client: OkHttpClient = pageClient()
     ): PageResponse {
         val targetUrl = absUrl(url)
         val requestBuilder = Request.Builder()
@@ -94,29 +148,30 @@ object XingfanClient {
         if (!etag.isNullOrEmpty()) requestBuilder.header("If-None-Match", etag)
         if (!lastModified.isNullOrEmpty()) requestBuilder.header("If-Modified-Since", lastModified)
 
-        executePageCall(httpClient.newCall(requestBuilder.build())).use { response ->
+        return executePageCall(client.newCall(requestBuilder.build()), scope) { response ->
             if (response.code() == 304) {
-                return PageResponse(
+                PageResponse(
                     html = null,
                     finalUrl = response.request().url().toString(),
                     etag = response.header("ETag") ?: etag,
                     lastModified = response.header("Last-Modified") ?: lastModified,
                     notModified = true
                 )
-            }
-            if (!response.isSuccessful()) {
-                throw HttpStatusException(
-                    response.code(),
-                    "HTTP ${response.code()} error fetching $targetUrl"
+            } else {
+                if (!response.isSuccessful()) {
+                    throw HttpStatusException(
+                        response.code(),
+                        "HTTP ${response.code()} error fetching $targetUrl"
+                    )
+                }
+                PageResponse(
+                    html = response.body()?.string() ?: "",
+                    finalUrl = response.request().url().toString(),
+                    etag = response.header("ETag"),
+                    lastModified = response.header("Last-Modified"),
+                    notModified = false
                 )
             }
-            return PageResponse(
-                html = response.body()?.string() ?: "",
-                finalUrl = response.request().url().toString(),
-                etag = response.header("ETag"),
-                lastModified = response.header("Last-Modified"),
-                notModified = false
-            )
         }
     }
 

@@ -1,10 +1,12 @@
 package com.hm.video.ui
 
 import android.app.Application
+import android.media.AudioManager
 import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -196,22 +198,253 @@ class PlayerActivityTest {
         }
     }
 
+    // ---------------------------------------------------------------
+    // Reordering state after a background kill
+    // ---------------------------------------------------------------
+
+    @Test
+    fun recreationRestoresTheEpisodeThatWasPlaying() {
+        storage.recordHistory(episodeTwoHistory(300))
+        set("epUrl", "/dianshiju/test/1-2.html")
+        set("epTitle", "第 2 集")
+        set("episodeNo", 2)
+        set("loadedEpisodeUrl", "/dianshiju/test/1-2.html")
+        set("currentSpeed", 1.5f)
+        set("speedIndex", 3)
+        set("readyHandledForSource", true)
+        set("initialSeekApplied", true)
+        fake.position = 240_000L
+        // The user had paused; do not flush here, so history (300s) stays ahead of the bundle.
+        set("playRequested", false)
+        val state = android.os.Bundle()
+        call("onSaveInstanceState", state)
+
+        val (restored, restoredFake) = recreateWith(state)
+
+        assertEquals("/dianshiju/test/1-2.html", getOn(restored, "epUrl"))
+        assertEquals("第 2 集", getOn(restored, "epTitle"))
+        assertEquals(2, getOn(restored, "episodeNo"))
+        assertEquals(240_000L, getOn(restored, "resumePositionMs"))
+        assertEquals(1.5f, getOn(restored, "currentSpeed"))
+        assertEquals(false, getOn(restored, "playRequested"))
+        assertEquals("1.5x", restored.findViewById<android.widget.Button>(R.id.player_btn_speed).text.toString())
+
+        setOn(restored, "playInfo", PlayInfo("测试", "第 2 集", lines = listOf(
+            PlayLine("线路", "https://example.invalid/a.m3u8")
+        )))
+        callOn(restored, "startStream", 0, false)
+        callOn(restored, "onPlayerReady")
+
+        assertEquals(300_000L, restoredFake.position) // history is further than the bundle
+        assertFalse("a paused session must stay paused", restoredFake.playWhenReady)
+        assertEquals(1.5f, restoredFake.speed, 0f)
+        val history = storage.getHistoryItem("/dianshiju/test/")!!
+        assertEquals("/dianshiju/test/1-2.html", history.episodeUrl)
+        assertEquals(2, history.episodeNo)
+        assertEquals("the other episode's latest history must survive", 300L, history.progressSec)
+    }
+
+    @Test
+    fun savedStateNeverContainsSignedStreamLinks() {
+        set("playInfo", PlayInfo("测试", "第一集", lines = listOf(
+            PlayLine("线路", "https://cdn.example.invalid/v.m3u8?token=secret-signature")
+        )))
+        val state = android.os.Bundle()
+        call("onSaveInstanceState", state)
+
+        val dumped = state.keySet().joinToString("|") { key -> "$key=${state.get(key)}" }
+        assertFalse(dumped.contains("secret-signature"))
+        assertFalse(dumped.contains("example.invalid"))
+    }
+
+    // ---------------------------------------------------------------
+    // Audio focus and headset unplug
+    // ---------------------------------------------------------------
+
+    @Test
+    fun transientFocusLossPausesAndResumesWhenFocusReturns() {
+        set("readyHandledForSource", true)
+        set("initialSeekApplied", true)
+        call("requestPlayback", true)
+        assertTrue(fake.playWhenReady)
+
+        call("handleAudioFocusChange", AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+        assertFalse(fake.playWhenReady)
+        assertEquals(true, get("playRequested"))
+
+        call("handleAudioFocusChange", AudioManager.AUDIOFOCUS_GAIN)
+        assertTrue(fake.playWhenReady)
+    }
+
+    @Test
+    fun focusLossThenBackgroundNeverAutoplaysOnReturn() {
+        set("readyHandledForSource", true)
+        set("initialSeekApplied", true)
+        call("requestPlayback", true)
+
+        call("handleAudioFocusChange", AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+        assertFalse(fake.playWhenReady)
+        call("onStop")
+        call("onStart")
+
+        assertFalse("auto-paused before backgrounding must stay paused", fake.playWhenReady)
+        assertEquals(false, get("playRequested"))
+    }
+
+    @Test
+    fun permanentFocusLossClearsThePlayIntent() {
+        set("readyHandledForSource", true)
+        set("initialSeekApplied", true)
+        call("requestPlayback", true)
+
+        call("handleAudioFocusChange", AudioManager.AUDIOFOCUS_LOSS)
+        assertFalse(fake.playWhenReady)
+        assertEquals(false, get("playRequested"))
+
+        call("handleAudioFocusChange", AudioManager.AUDIOFOCUS_GAIN)
+        assertFalse(fake.playWhenReady)
+        call("onStop")
+        call("onStart")
+        assertFalse(fake.playWhenReady)
+    }
+
+    @Test
+    fun headsetUnplugPausesAndDoesNotResumeByItself() {
+        set("readyHandledForSource", true)
+        set("initialSeekApplied", true)
+        call("requestPlayback", true)
+
+        call("handleBecomingNoisy")
+        assertFalse(fake.playWhenReady)
+        assertEquals(false, get("playRequested"))
+
+        call("onStop")
+        call("onStart")
+        assertFalse(fake.playWhenReady)
+    }
+
+    @Test
+    fun automaticPauseStillFlushesProgress() {
+        storage.recordHistory(history(progress = 0))
+        set("readyHandledForSource", true)
+        fake.position = 90_000L
+        set("lastProgressSavedAt", SystemClock.elapsedRealtime())
+
+        call("handleAudioFocusChange", AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+
+        assertEquals(90L, storage.getHistoryItem("/dianshiju/test/")!!.progressSec)
+    }
+
+    // ---------------------------------------------------------------
+    // Media kind: response, final address or manifest, never the query string
+    // ---------------------------------------------------------------
+
+    @Test
+    fun mp4WithM3u8InQueryIsHandedOverAsProgressive() {
+        set("playInfo", PlayInfo("测试", "第一集", lines = listOf(
+            PlayLine("线路", "https://example.invalid/movie.mp4?token=a.m3u8")
+        )))
+
+        call("startStream", 0, false)
+
+        val item = fake.mediaItem!!
+        assertEquals(MimeTypes.VIDEO_MP4, item.localConfiguration!!.mimeType)
+        assertEquals("example.invalid", item.localConfiguration!!.uri.host)
+    }
+
+    @Test
+    fun plainPlaylistKeepsItsHlsMimeType() {
+        call("startStream", 0, false)
+        assertEquals(MimeTypes.APPLICATION_M3U8, fake.mediaItem!!.localConfiguration!!.mimeType)
+    }
+
+    @Test
+    fun extensionlessHlsIsSniffedBeforeHandover() {
+        com.hm.video.FixtureHttpServer {
+            com.hm.video.FixtureResponse.text(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:4\n",
+                "application/octet-stream"
+            )
+        }.use { server ->
+            com.hm.video.player.MediaStreamProbe.clearCacheForTest()
+            set("playInfo", PlayInfo("测试", "第一集", lines = listOf(
+                PlayLine("线路", "${server.baseUrl}/play/1")
+            )))
+
+            call("startStream", 0, false)
+            awaitMediaItem()
+
+            assertEquals(MimeTypes.APPLICATION_M3U8, fake.mediaItem!!.localConfiguration!!.mimeType)
+        }
+    }
+
+    @Test
+    fun extensionlessUnknownStreamIsNotForcedToHls() {
+        com.hm.video.FixtureHttpServer {
+            com.hm.video.FixtureResponse.text("<html>not media</html>", "text/html")
+        }.use { server ->
+            com.hm.video.player.MediaStreamProbe.clearCacheForTest()
+            set("playInfo", PlayInfo("测试", "第一集", lines = listOf(
+                PlayLine("线路", "${server.baseUrl}/watch/2")
+            )))
+
+            call("startStream", 0, false)
+            awaitMediaItem()
+
+            assertNull(fake.mediaItem!!.localConfiguration!!.mimeType)
+            assertEquals(server.baseUrl.substringAfter("//"), fake.mediaItem!!.localConfiguration!!.uri.authority)
+        }
+    }
+
+    private fun awaitMediaItem() {
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (fake.mediaItem == null && System.nanoTime() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        assertNotNull("media item was never prepared", fake.mediaItem)
+    }
+
     private fun history(progress: Long) = HistoryItem(
         url = "/dianshiju/test/", title = "测试", poster = "", episodeNo = 1,
         episodeUrl = "/dianshiju/test/1-1.html", progressSec = progress, durationSec = 600
     )
 
-    private fun set(name: String, value: Any) {
-        PlayerActivity::class.java.getDeclaredField(name).apply { isAccessible = true; set(activity, value) }
+    private fun episodeTwoHistory(progress: Long) = HistoryItem(
+        url = "/dianshiju/test/", title = "测试", poster = "", episodeNo = 2,
+        episodeUrl = "/dianshiju/test/1-2.html", progressSec = progress, durationSec = 600
+    )
+
+    private fun set(name: String, value: Any) = setOn(activity, name, value)
+
+    private fun setOn(target: PlayerActivity, name: String, value: Any) {
+        PlayerActivity::class.java.getDeclaredField(name).apply { isAccessible = true; set(target, value) }
     }
 
-    private fun get(name: String): Any? = PlayerActivity::class.java.getDeclaredField(name).run {
-        isAccessible = true; get(activity)
-    }
+    private fun get(name: String): Any? = getOn(activity, name)
 
-    private fun call(name: String, vararg args: Any) {
+    private fun getOn(target: PlayerActivity, name: String): Any? =
+        PlayerActivity::class.java.getDeclaredField(name).run { isAccessible = true; get(target) }
+
+    private fun call(name: String, vararg args: Any) = callOn(activity, name, *args)
+
+    private fun callOn(target: PlayerActivity, name: String, vararg args: Any) {
         PlayerActivity::class.java.declaredMethods.first { it.name == name && it.parameterCount == args.size }
-            .apply { isAccessible = true }.invoke(activity, *args)
+            .apply { isAccessible = true }.invoke(target, *args)
+    }
+
+    /** Mirrors the order used by onCreate for a second activity instance. */
+    private fun recreateWith(saved: android.os.Bundle): Pair<PlayerActivity, FakePlayer> {
+        val second = Robolectric.buildActivity(PlayerActivity::class.java).get()
+        second.setTheme(android.R.style.Theme_Material_NoActionBar)
+        second.setContentView(R.layout.activity_player)
+        callOn(second, "restorePlaybackState", saved)
+        callOn(second, "initViews")
+        val secondFake = FakePlayer()
+        setOn(second, "exoPlayer", secondFake.player)
+        setOn(second, "httpDataSourceFactory", DefaultHttpDataSource.Factory())
+        setOn(second, "activityStarted", true)
+        return second to secondFake
     }
 
     private class FakePlayer {

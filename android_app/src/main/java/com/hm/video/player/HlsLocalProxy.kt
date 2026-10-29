@@ -54,11 +54,14 @@ object HlsLocalProxy {
         workers.purge()
     }
 
-    fun getProxyUrl(targetUrl: String, refererUrl: String? = null): String = try {
+    fun getProxyUrl(targetUrl: String, refererUrl: String? = null, hls: Boolean = false): String = try {
         val target = URLEncoder.encode(targetUrl, "UTF-8")
         val referer = refererUrl?.takeIf { it.isNotBlank() }
             ?.let { "&referer=${URLEncoder.encode(it, "UTF-8")}" }.orEmpty()
-        "http://127.0.0.1:${XingfanConfig.LOCAL_PROXY_PORT}/hls?url=$target$referer"
+        // `kind=hls` comes from the media-type probe, so an extensionless playlist is still
+        // rewritten instead of being relayed as an opaque byte stream.
+        val kind = if (hls) "&kind=hls" else ""
+        "http://127.0.0.1:${XingfanConfig.LOCAL_PROXY_PORT}/hls?url=$target$referer$kind"
     } catch (_: Exception) { targetUrl }
 
     private fun handleClient(socket: Socket) {
@@ -80,7 +83,7 @@ object HlsLocalProxy {
                 val targetUrl = query["url"].orEmpty()
                 val parsed = runCatching { URL(targetUrl) }.getOrNull()
                 if (parsed == null || parsed.protocol !in setOf("http", "https")) return sendStatus(client, 400, "Bad Request")
-                proxyRequest(client, targetUrl, headers["range"], query["referer"])
+                proxyRequest(client, targetUrl, headers["range"], query["referer"], query["kind"] == "hls")
             } catch (_: Exception) {
                 // Client disconnects and bounded header timeouts are expected during seek.
             }
@@ -106,7 +109,13 @@ object HlsLocalProxy {
         return null
     }
 
-    private fun proxyRequest(socket: Socket, targetUrl: String, rangeHeader: String?, refererUrl: String?) {
+    private fun proxyRequest(
+        socket: Socket,
+        targetUrl: String,
+        rangeHeader: String?,
+        refererUrl: String?,
+        hlsHint: Boolean
+    ) {
         val targetUri = URL(targetUrl)
         val request = Request.Builder().url(targetUrl)
             .header("User-Agent", XingfanConfig.USER_AGENT)
@@ -118,7 +127,11 @@ object HlsLocalProxy {
                 val body = response.body()
                 val contentType = response.header("Content-Type").orEmpty()
                 val finalUrl = response.request().url().toString()
-                val isPlaylist = response.isSuccessful() && (contentType.contains("mpegurl", true) || targetUrl.contains(".m3u8", true))
+                val isPlaylist = response.isSuccessful() && (
+                    contentType.contains("mpegurl", true) ||
+                        targetUrl.contains(".m3u8", true) ||
+                        hlsHint
+                    )
                 val output = BufferedOutputStream(socket.getOutputStream())
                 if (isPlaylist) {
                     val playlist = body?.string().orEmpty()

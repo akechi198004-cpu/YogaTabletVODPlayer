@@ -12,6 +12,7 @@ import android.widget.*
 import androidx.media3.common.util.UnstableApi
 import com.hm.video.HMVideoApplication
 import com.hm.video.R
+import com.hm.video.data.api.PageCallScope
 import com.hm.video.data.api.XingfanRepository
 import com.hm.video.data.model.FavoriteItem
 import com.hm.video.data.model.WorkLine
@@ -25,6 +26,7 @@ class DetailActivity : Activity() {
     private var isDetailLoading = true
     private var detailLoadError: String? = null
     private var detailRequestId = 0
+    private val pageCallScope = PageCallScope()
     private var tvMode = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -86,12 +88,13 @@ class DetailActivity : Activity() {
 
     private fun loadDetail(forceRefresh: Boolean = false) {
         val requestId = ++detailRequestId
+        pageCallScope.cancel()
         isDetailLoading = true
         detailLoadError = null
         currentDetail?.let(::renderDetail)
         Thread {
             try {
-                val detail = XingfanRepository.getDetail(detailUrl, forceRefresh)
+                val detail = XingfanRepository.getDetail(detailUrl, forceRefresh, pageCallScope)
                 mainHandler.post {
                     if (requestId != detailRequestId || isFinishing || isDestroyed) return@post
                     isDetailLoading = false
@@ -365,6 +368,7 @@ class DetailActivity : Activity() {
 
     override fun onDestroy() {
         detailRequestId++
+        pageCallScope.cancel()
         super.onDestroy()
     }
 }

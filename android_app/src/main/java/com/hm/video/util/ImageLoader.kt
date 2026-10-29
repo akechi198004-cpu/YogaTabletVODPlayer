@@ -170,7 +170,7 @@ object ImageLoader {
                 .header("Referer", "${XingfanConfig.SOURCE_BASE}/")
                 .build()
 
-            val call = XingfanClient.httpClient.newCall(request)
+            val call = XingfanClient.imageHttpClient.newCall(request)
             inFlight[imageView] = call
             if (!isCurrent(imageView, requestedUrl)) {
                 inFlight.remove(imageView, call)
@@ -219,7 +219,7 @@ object ImageLoader {
                         .header("Referer", "${XingfanConfig.SOURCE_BASE}/")
                         .header("If-Modified-Since", httpDate(fetchedAt))
                         .build()
-                    XingfanClient.httpClient.newCall(request).execute().use { response ->
+                    XingfanClient.imageHttpClient.newCall(request).execute().use { response ->
                         when {
                             response.code() == 304 -> {
                                 disk.markValidated(url)

@@ -1,9 +1,14 @@
 package com.hm.video.ui
 
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -12,6 +17,8 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.View
 import android.widget.*
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackParameters
@@ -24,6 +31,7 @@ import androidx.media3.ui.PlayerView
 import androidx.media3.common.util.UnstableApi
 import com.hm.video.HMVideoApplication
 import com.hm.video.R
+import com.hm.video.data.api.PageCallScope
 import com.hm.video.data.api.XingfanConfig
 import com.hm.video.data.api.XingfanRepository
 import com.hm.video.data.model.HistoryItem
@@ -31,6 +39,8 @@ import com.hm.video.data.model.PlayInfo
 import com.hm.video.data.model.PlayLine
 import com.hm.video.player.HlsLocalProxy
 import com.hm.video.player.LineProbe
+import com.hm.video.player.MediaStreamKind
+import com.hm.video.player.MediaStreamProbe
 import com.hm.video.util.lineLabels
 
 @UnstableApi
@@ -64,6 +74,7 @@ class PlayerActivity : Activity() {
     private var readyHandledForSource = false
     private var terminalPlaybackError = false
     private var loadGeneration = 0
+    private var streamGeneration = 0
     private var lineProbe: LineProbe? = null
     private var lineOrder = emptyList<Int>()
     private var lineMeasurements = emptyMap<Int, LineProbe.Result>()
@@ -75,7 +86,25 @@ class PlayerActivity : Activity() {
     private var resumePositionMs: Long? = null
     private var lastProgressSavedAt = 0L
     private var posterUrl = ""
+    private val pageCallScope = PageCallScope()
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var audioManager: AudioManager? = null
+    /** True while playback is held back because another app owns audio focus. */
+    private var audioFocusLost = false
+    /** Only a transient loss resumes on its own, and only while this screen is started. */
+    private var resumeOnFocusGain = false
+    private var noisyReceiverRegistered = false
+
+    private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        handleAudioFocusChange(change)
+    }
+
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) handleBecomingNoisy()
+        }
+    }
 
     private val hideOverlayRunnable = Runnable {
         if (exoPlayer?.isPlaying == true && overlay.visibility == View.VISIBLE) overlay.visibility = View.GONE
@@ -108,12 +137,60 @@ class PlayerActivity : Activity() {
         detailUrl = intent.getStringExtra("detail_url").orEmpty()
         posterUrl = intent.getStringExtra("poster").orEmpty()
         episodeNo = intent.getIntExtra("episode_no", 1).coerceAtLeast(1)
+        // A recreated activity must continue the episode it was actually playing, not the one
+        // named by the original intent, or a background kill would rewind and overwrite history.
+        restorePlaybackState(savedInstanceState)
         initViews()
         if (tvMode) {
             btnTopOrientation?.visibility = View.GONE
         }
+        audioManager = getSystemService(AUDIO_SERVICE) as? AudioManager
         initPlayer()
         loadPlayInfo()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(KEY_EP_URL, epUrl)
+        outState.putString(KEY_EP_TITLE, epTitle)
+        outState.putString(KEY_WORK_TITLE, workTitle)
+        outState.putString(KEY_DETAIL_URL, detailUrl)
+        outState.putString(KEY_POSTER, posterUrl)
+        outState.putString(KEY_LOADED_EP, loadedEpisodeUrl)
+        outState.putInt(KEY_EPISODE_NO, episodeNo)
+        outState.putFloat(KEY_SPEED, currentSpeed)
+        // Before READY the player sits at 0 while resumePositionMs already holds the real spot.
+        outState.putLong(KEY_POSITION_MS, maxOf(exoPlayer?.currentPosition ?: 0L, resumePositionMs ?: 0L))
+        // An auto-pause (focus loss, unplugged headset) must not become an auto-play on restore.
+        outState.putBoolean(KEY_PLAY_REQUESTED, playRequested && !audioFocusLost)
+        outState.putBoolean(KEY_INITIAL_SEEK_DONE, initialSeekApplied)
+    }
+
+    /**
+     * Restores the current episode and playback intent. Only page-level URLs are stored; signed
+     * stream links stay in memory and are re-resolved after a process death.
+     */
+    private fun restorePlaybackState(state: Bundle?) {
+        if (state == null) return
+        epUrl = state.getString(KEY_EP_URL) ?: epUrl
+        epTitle = state.getString(KEY_EP_TITLE) ?: epTitle
+        workTitle = state.getString(KEY_WORK_TITLE) ?: workTitle
+        detailUrl = state.getString(KEY_DETAIL_URL) ?: detailUrl
+        posterUrl = state.getString(KEY_POSTER) ?: posterUrl
+        // Treat the restored episode as already loaded so loadPlayInfo() keeps the position
+        // instead of clearing resumePositionMs as it would for a brand-new episode.
+        loadedEpisodeUrl = state.getString(KEY_LOADED_EP) ?: epUrl
+        episodeNo = state.getInt(KEY_EPISODE_NO, episodeNo).coerceAtLeast(1)
+        val restoredSpeed = state.getFloat(KEY_SPEED, currentSpeed)
+        val restoredIndex = speeds.indexOfFirst { kotlin.math.abs(it - restoredSpeed) < 0.001f }
+        if (restoredIndex >= 0) {
+            speedIndex = restoredIndex
+            currentSpeed = speeds[restoredIndex]
+        }
+        val position = state.getLong(KEY_POSITION_MS, 0L)
+        if (position > 0L) resumePositionMs = position
+        playRequested = state.getBoolean(KEY_PLAY_REQUESTED, playRequested)
+        initialSeekApplied = state.getBoolean(KEY_INITIAL_SEEK_DONE, false)
     }
 
     private fun initPlayer() {
@@ -123,8 +200,16 @@ class PlayerActivity : Activity() {
             .setReadTimeoutMs(45000)
             .setAllowCrossProtocolRedirects(true)
         val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .build()
         exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            // Focus loss and headset unplug are handled here so playRequested stays authoritative:
+            // an automatic pause must never silently turn into an automatic resume.
+            .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ false)
+            .setHandleAudioBecomingNoisy(false)
             .build().also { player ->
                 playerView.player = player
                 player.addListener(object : Player.Listener {
@@ -154,6 +239,7 @@ class PlayerActivity : Activity() {
         timeDisplay = findViewById(R.id.player_time_display)
         btnPlayPause = findViewById(R.id.player_btn_play_pause)
         btnSpeed = findViewById(R.id.player_btn_speed)
+        btnSpeed.text = "${currentSpeed}x"
         btnTopOrientation = findViewById(R.id.player_btn_top_orientation)
         loadingLayout = findViewById(R.id.player_loading_layout)
         resumeToast = findViewById(R.id.player_resume_toast)
@@ -223,18 +309,18 @@ class PlayerActivity : Activity() {
             return
         }
         readyHandledForSource = true
+        val history = HMVideoApplication.instance.storageManager.getHistoryItem(detailUrl, epUrl)
+        val historyMs = history?.progressSec?.takeIf { it > 3 }?.times(1000) ?: 0L
         val savedPosition = resumePositionMs
         if (savedPosition != null) {
-            player.seekTo(savedPosition)
-        } else if (!initialSeekApplied) {
-            val hist = HMVideoApplication.instance.storageManager.getHistoryItem(detailUrl, epUrl)
-            if (hist != null && hist.progressSec > 3) {
-                val resumeAt = hist.progressSec * 1000
-                player.seekTo(resumeAt)
-                resumeToast.text = "已自动定位到上次播放 ${formatTime(resumeAt.toInt())}"
-                resumeToast.visibility = View.VISIBLE
-                mainHandler.postDelayed({ resumeToast.visibility = View.GONE }, 3500)
-            }
+            // A restored bundle can be slightly older than the last flushed history entry for the
+            // same episode, so resume from whichever position is further along.
+            player.seekTo(maxOf(savedPosition, historyMs))
+        } else if (!initialSeekApplied && historyMs > 0L) {
+            player.seekTo(historyMs)
+            resumeToast.text = "已自动定位到上次播放 ${formatTime(historyMs.toInt())}"
+            resumeToast.visibility = View.VISIBLE
+            mainHandler.postDelayed({ resumeToast.visibility = View.GONE }, 3500)
         }
         resumePositionMs = null
         initialSeekApplied = true
@@ -343,6 +429,8 @@ class PlayerActivity : Activity() {
             playRequested = true
         }
         val generation = ++loadGeneration
+        streamGeneration++
+        pageCallScope.cancel()
         lineProbe?.cancel()
         lineProbe = null
         lineOrder = emptyList()
@@ -371,7 +459,7 @@ class PlayerActivity : Activity() {
 
         Thread {
             try {
-                val info = XingfanRepository.getPlayInfo(targetEpisodeUrl, forceRefresh)
+                val info = XingfanRepository.getPlayInfo(targetEpisodeUrl, forceRefresh, pageCallScope)
                 mainHandler.post {
                     if (generation != loadGeneration || isFinishing || isDestroyed) return@post
                     if (info.lines.isEmpty()) {
@@ -491,21 +579,61 @@ class PlayerActivity : Activity() {
         val referer = playInfo?.serviceUrl?.takeIf { it.isNotBlank() }
             ?: epUrl.ifBlank { XingfanConfig.SOURCE_BASE }
         httpDataSourceFactory.setDefaultRequestProperties(mapOf("Referer" to referer))
-        val playbackUrl = if (useProxy) HlsLocalProxy.getProxyUrl(line.url, referer) else line.url
+        val generation = ++streamGeneration
+        val fromPath = MediaStreamProbe.inferFromPath(line.url)
+        if (fromPath != null) {
+            beginPlayback(line, lineIndex, useProxy, referer, fromPath)
+            return
+        }
+        // The URL alone proves nothing (extensionless or redirected endpoints), so sniff the
+        // real response before Media3 has to choose between HLS and progressive playback.
+        Thread {
+            val kind = MediaStreamProbe.kindFor(line.url, referer)
+            mainHandler.post {
+                if (generation != streamGeneration || isFinishing || isDestroyed) return@post
+                if (playInfo?.lines?.getOrNull(lineIndex)?.url != line.url) return@post
+                beginPlayback(line, lineIndex, useProxy, referer, kind)
+            }
+        }.start()
+    }
+
+    private fun beginPlayback(
+        line: PlayLine,
+        lineIndex: Int,
+        useProxy: Boolean,
+        referer: String,
+        kind: MediaStreamKind
+    ) {
+        val playbackUrl = if (useProxy) {
+            HlsLocalProxy.getProxyUrl(line.url, referer, kind == MediaStreamKind.HLS)
+        } else {
+            line.url
+        }
         android.util.Log.i("HMPlayer", "start line='" + line.name + "' index=" + lineIndex +
-            " proxy=" + useProxy + " m3u8=" + line.url.contains(".m3u8", true) +
-            " url=" + line.url.take(140))
+            " proxy=" + useProxy + " kind=" + kind + " url=" + line.url.take(140))
         try {
             val player = exoPlayer ?: return
             player.stop()
             readyHandledForSource = false
+            val path = okhttp3.HttpUrl.parse(line.url)?.encodedPath()?.lowercase().orEmpty()
             val mediaItem = MediaItem.Builder()
                 .setUri(Uri.parse(playbackUrl))
-                .apply { if (line.url.contains(".m3u8", ignoreCase = true)) setMimeType(MimeTypes.APPLICATION_M3U8) }
+                .apply {
+                    when (kind) {
+                        // Only claim HLS when the response proved it; an `.m3u8` in a query
+                        // string must not turn an MP4 into a playlist.
+                        MediaStreamKind.HLS -> setMimeType(MimeTypes.APPLICATION_M3U8)
+                        MediaStreamKind.PROGRESSIVE ->
+                            if (path.endsWith(".mp4") || path.endsWith(".m4v")) {
+                                setMimeType(MimeTypes.VIDEO_MP4)
+                            }
+                        MediaStreamKind.UNKNOWN -> Unit
+                    }
+                }
                 .build()
             player.setMediaItem(mediaItem, resumePositionMs ?: 0L)
             player.playbackParameters = PlaybackParameters(currentSpeed)
-            player.playWhenReady = activityStarted && playRequested
+            applyPlayWhenReady()
             player.prepare()
         } catch (error: Exception) {
             handleStreamFailure(error as? androidx.media3.common.PlaybackException
@@ -530,8 +658,101 @@ class PlayerActivity : Activity() {
 
     private fun requestPlayback(play: Boolean) {
         playRequested = play
-        exoPlayer?.playWhenReady = activityStarted && play
-        if (!play) saveProgress(force = true)
+        if (play) {
+            audioFocusLost = false
+            resumeOnFocusGain = false
+            requestAudioFocus()
+        }
+        applyPlayWhenReady()
+        if (!play) {
+            saveProgress(force = true)
+            abandonAudioFocus()
+        }
+    }
+
+    /** The only place that turns user intent into playWhenReady, so pause reasons stay explicit. */
+    private fun applyPlayWhenReady() {
+        exoPlayer?.playWhenReady = activityStarted && playRequested && !audioFocusLost
+    }
+
+    private fun requestAudioFocus() {
+        audioManager?.requestAudioFocus(
+            audioFocusListener,
+            AudioManager.STREAM_MUSIC,
+            AudioManager.AUDIOFOCUS_GAIN
+        )
+    }
+
+    private fun abandonAudioFocus() {
+        audioManager?.abandonAudioFocus(audioFocusListener)
+    }
+
+    /**
+     * A transient loss resumes when focus comes back; a permanent loss clears the play intent.
+     * Headset unplug is handled separately by [handleBecomingNoisy].
+     */
+    private fun handleAudioFocusChange(change: Int) {
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                audioFocusLost = true
+                resumeOnFocusGain = false
+                playRequested = false
+                exoPlayer?.volume = 1f
+                applyPlayWhenReady()
+                saveProgress(force = true)
+                syncPlaybackButton()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                audioFocusLost = true
+                resumeOnFocusGain = true
+                applyPlayWhenReady()
+                saveProgress(force = true)
+                syncPlaybackButton()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                exoPlayer?.volume = 0.25f
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                exoPlayer?.volume = 1f
+                if (resumeOnFocusGain && activityStarted) {
+                    resumeOnFocusGain = false
+                    audioFocusLost = false
+                    if (playRequested) requestAudioFocus()
+                    applyPlayWhenReady()
+                }
+                syncPlaybackButton()
+            }
+        }
+    }
+
+    /** Unplugging headphones is an explicit stop signal: do not resume by itself later. */
+    private fun handleBecomingNoisy() {
+        playRequested = false
+        audioFocusLost = false
+        resumeOnFocusGain = false
+        applyPlayWhenReady()
+        saveProgress(force = true)
+        syncPlaybackButton()
+    }
+
+    private fun registerNoisyReceiver() {
+        if (noisyReceiverRegistered) return
+        try {
+            registerReceiver(noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
+            noisyReceiverRegistered = true
+        } catch (_: Exception) {
+            // Best effort: playback still works without the unplug broadcast.
+        }
+    }
+
+    private fun unregisterNoisyReceiver() {
+        if (!noisyReceiverRegistered) return
+        noisyReceiverRegistered = false
+        try {
+            unregisterReceiver(noisyReceiver)
+        } catch (_: Exception) {
+            // Already detached with the activity.
+        }
     }
 
     /** Keep the last usable position even if the replacement source fails before READY. */
@@ -584,8 +805,12 @@ class PlayerActivity : Activity() {
     override fun onDestroy() {
         saveProgress(force = true)
         loadGeneration++
+        streamGeneration++
         lineProbe?.cancel()
         lineProbe = null
+        pageCallScope.cancel()
+        unregisterNoisyReceiver()
+        abandonAudioFocus()
         mainHandler.removeCallbacksAndMessages(null)
         playerView.player = null
         exoPlayer?.release()
@@ -597,13 +822,21 @@ class PlayerActivity : Activity() {
         activityStarted = false
         saveProgress(force = true)
         exoPlayer?.pause()
+        // A pause caused by focus loss must not become an automatic resume on return.
+        if (audioFocusLost) playRequested = false
+        audioFocusLost = false
+        resumeOnFocusGain = false
+        unregisterNoisyReceiver()
+        abandonAudioFocus()
         super.onStop()
     }
 
     override fun onStart() {
         super.onStart()
         activityStarted = true
-        exoPlayer?.playWhenReady = playRequested
+        registerNoisyReceiver()
+        if (playRequested) requestAudioFocus()
+        applyPlayWhenReady()
         syncPlaybackButton()
     }
 
@@ -679,5 +912,19 @@ class PlayerActivity : Activity() {
             }
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    private companion object {
+        const val KEY_EP_URL = "hm.player.ep_url"
+        const val KEY_EP_TITLE = "hm.player.ep_title"
+        const val KEY_WORK_TITLE = "hm.player.work_title"
+        const val KEY_DETAIL_URL = "hm.player.detail_url"
+        const val KEY_POSTER = "hm.player.poster"
+        const val KEY_LOADED_EP = "hm.player.loaded_ep"
+        const val KEY_EPISODE_NO = "hm.player.episode_no"
+        const val KEY_SPEED = "hm.player.speed"
+        const val KEY_POSITION_MS = "hm.player.position_ms"
+        const val KEY_PLAY_REQUESTED = "hm.player.play_requested"
+        const val KEY_INITIAL_SEEK_DONE = "hm.player.initial_seek_done"
     }
 }

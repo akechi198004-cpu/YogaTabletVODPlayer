@@ -10,6 +10,7 @@ import android.view.View
 import android.widget.*
 import com.hm.video.R
 import com.hm.video.HMVideoApplication
+import com.hm.video.data.api.PageCallScope
 import com.hm.video.data.api.XingfanRepository
 import com.hm.video.data.model.WorkItem
 import com.hm.video.util.LoadingViewHelper
@@ -26,6 +27,7 @@ class SearchActivity : Activity() {
     private var currentPage = 1
     private var totalPages = 1
     private var searchRequestId = 0
+    private val pageCallScope = PageCallScope()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var searchInput: EditText
@@ -179,6 +181,7 @@ class SearchActivity : Activity() {
         if (keyword.isEmpty()) return
         currentPage = page.coerceAtLeast(1)
         val requestId = ++searchRequestId
+        pageCallScope.cancel()
         val requestedCid = currentCid
         val requestedPage = currentPage
         val storage = HMVideoApplication.instance.storageManager
@@ -202,7 +205,7 @@ class SearchActivity : Activity() {
 
         Thread {
             try {
-                val res = XingfanRepository.search(keyword, requestedCid, requestedPage)
+                val res = XingfanRepository.search(keyword, requestedCid, requestedPage, scope = pageCallScope)
                 mainHandler.post {
                     if (requestId != searchRequestId || isFinishing || isDestroyed) return@post
                     currentPage = res.page
@@ -360,6 +363,7 @@ class SearchActivity : Activity() {
 
     override fun onDestroy() {
         searchRequestId++
+        pageCallScope.cancel()
         super.onDestroy()
     }
 }

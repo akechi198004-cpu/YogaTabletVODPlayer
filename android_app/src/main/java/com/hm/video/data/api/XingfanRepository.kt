@@ -306,24 +306,33 @@ object XingfanRepository {
 
     data class FetchedPage(val html: String, val finalUrl: String)
 
-    fun fetchPageWithFinalUrl(url: String, referer: String? = null): FetchedPage {
+    fun fetchPageWithFinalUrl(
+        url: String,
+        referer: String? = null,
+        scope: PageCallScope? = null
+    ): FetchedPage {
         val targetUrl = XingfanClient.absUrl(url)
         val requestBuilder = okhttp3.Request.Builder().url(targetUrl)
             .header("User-Agent", XingfanConfig.USER_AGENT)
             .header("Referer", referer ?: "${XingfanConfig.SOURCE_BASE}/")
-        XingfanClient.httpClient.newCall(requestBuilder.build()).execute().use { response ->
+        // Same whole-call budget as catalog pages: the player-service response is a page too,
+        // and its body used to be read after the old deadline had already been cancelled.
+        return XingfanClient.executePageCall(
+            XingfanClient.pageClient().newCall(requestBuilder.build()),
+            scope
+        ) { response ->
             if (!response.isSuccessful()) {
                 throw HttpStatusException(response.code(), "HTTP ${response.code()} error fetching ${response.request().url()}")
             }
-            return FetchedPage(response.body()?.string().orEmpty(), response.request().url().toString())
+            FetchedPage(response.body()?.string().orEmpty(), response.request().url().toString())
         }
     }
 
-    fun getHome(forceRefresh: Boolean = false): HomeData {
+    fun getHome(forceRefresh: Boolean = false, scope: PageCallScope? = null): HomeData {
         val key = "home"
         return loadWithCache(homeCache, key, typeHome, CachePolicy.HOME, forceRefresh,
             shouldCache = { it.hero.isNotEmpty() || it.recent.isNotEmpty() }) { etag, lastModified ->
-            val page = XingfanClient.fetchPageWithValidators("/", etag = etag, lastModified = lastModified)
+            val page = XingfanClient.fetchPageWithValidators("/", etag = etag, lastModified = lastModified, scope = scope)
             if (page.notModified) {
                 NetworkResult(null, page.etag, page.lastModified, notModified = true)
             } else {
@@ -344,13 +353,14 @@ object XingfanRepository {
         year: String? = null,
         letter: String? = null,
         sort: String? = null,
-        forceRefresh: Boolean = false
+        forceRefresh: Boolean = false,
+        scope: PageCallScope? = null
     ): PageResult {
         val urlPath = XingfanClient.buildListUrl(cat, page, type, area, year, letter, sort)
         val key = "list:$urlPath"
         return loadWithCache(listCache, key, typePage, CachePolicy.LIST, forceRefresh,
             shouldCache = { isCacheableCatalogPage(it) }) { etag, lastModified ->
-            val response = XingfanClient.fetchPageWithValidators(urlPath, etag = etag, lastModified = lastModified)
+            val response = XingfanClient.fetchPageWithValidators(urlPath, etag = etag, lastModified = lastModified, scope = scope)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
             } else {
@@ -363,12 +373,18 @@ object XingfanRepository {
         }
     }
 
-    fun search(keyword: String, cid: Int? = null, page: Int = 1, forceRefresh: Boolean = false): PageResult {
+    fun search(
+        keyword: String,
+        cid: Int? = null,
+        page: Int = 1,
+        forceRefresh: Boolean = false,
+        scope: PageCallScope? = null
+    ): PageResult {
         val urlPath = XingfanClient.buildSearchUrl(keyword, cid, page)
         val key = "search:$urlPath"
         return loadWithCache(listCache, key, typePage, CachePolicy.SEARCH, forceRefresh,
             shouldCache = { isCacheableCatalogPage(it) }) { etag, lastModified ->
-            val response = XingfanClient.fetchPageWithValidators(urlPath, etag = etag, lastModified = lastModified)
+            val response = XingfanClient.fetchPageWithValidators(urlPath, etag = etag, lastModified = lastModified, scope = scope)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
             } else {
@@ -381,11 +397,11 @@ object XingfanRepository {
         }
     }
 
-    fun getDailyUpdates(forceRefresh: Boolean = false): List<WorkItem> {
+    fun getDailyUpdates(forceRefresh: Boolean = false, scope: PageCallScope? = null): List<WorkItem> {
         val key = "daily"
         return loadWithCache(dailyCache, key, typeWorkItems, CachePolicy.DAILY, forceRefresh,
             shouldCache = { it.isNotEmpty() }) { etag, lastModified ->
-            val response = XingfanClient.fetchPageWithValidators("/new.html", etag = etag, lastModified = lastModified)
+            val response = XingfanClient.fetchPageWithValidators("/new.html", etag = etag, lastModified = lastModified, scope = scope)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
             } else {
@@ -398,11 +414,11 @@ object XingfanRepository {
         }
     }
 
-    fun getTopBoards(forceRefresh: Boolean = false): TopBoards {
+    fun getTopBoards(forceRefresh: Boolean = false, scope: PageCallScope? = null): TopBoards {
         val key = "top"
         return loadWithCache(topCache, key, typeTop, CachePolicy.TOP, forceRefresh,
             shouldCache = { it.day.isNotEmpty() || it.week.isNotEmpty() || it.month.isNotEmpty() }) { etag, lastModified ->
-            val response = XingfanClient.fetchPageWithValidators("/top.html", etag = etag, lastModified = lastModified)
+            val response = XingfanClient.fetchPageWithValidators("/top.html", etag = etag, lastModified = lastModified, scope = scope)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
             } else {
@@ -415,7 +431,7 @@ object XingfanRepository {
         }
     }
 
-    fun getDetail(url: String, forceRefresh: Boolean = false): WorkDetail {
+    fun getDetail(url: String, forceRefresh: Boolean = false, scope: PageCallScope? = null): WorkDetail {
         val key = "detail:$url"
         return loadWithCache(
             memory = detailCache,
@@ -425,7 +441,7 @@ object XingfanRepository {
             forceRefresh = forceRefresh,
             shouldCache = { it.lines.isNotEmpty() }
         ) { etag, lastModified ->
-            val response = XingfanClient.fetchPageWithValidators(url, etag = etag, lastModified = lastModified)
+            val response = XingfanClient.fetchPageWithValidators(url, etag = etag, lastModified = lastModified, scope = scope)
             if (response.notModified) {
                 NetworkResult(null, response.etag, response.lastModified, notModified = true)
             } else {
@@ -438,19 +454,19 @@ object XingfanRepository {
         }
     }
 
-    fun getPlayInfo(url: String, forceRefresh: Boolean = false): PlayInfo {
+    fun getPlayInfo(url: String, forceRefresh: Boolean = false, scope: PageCallScope? = null): PlayInfo {
         val key = "play:$url"
         if (forceRefresh) playCache.remove(key)
         if (!forceRefresh) getCached(playCache, key)?.let { return it }
 
-        val html = XingfanClient.fetchPage(url)
+        val html = XingfanClient.fetchPage(url, scope = scope)
         val playerConfig = XingfanParser.extractPlayerConfig(html)
             ?: throw IOException("未能从播放页面提取到播放器配置")
 
         val titlePair = XingfanParser.parsePlayTitle(html)
         val serviceUrl = XingfanClient.buildPlayerServiceUrl(playerConfig.apiurl, playerConfig.url)
 
-        val servicePage = fetchPageWithFinalUrl(serviceUrl, XingfanClient.absUrl(url))
+        val servicePage = fetchPageWithFinalUrl(serviceUrl, XingfanClient.absUrl(url), scope)
         val lines = XingfanParser.extractPlayLinesFromPlayerHtml(servicePage.html, servicePage.finalUrl)
 
         if (lines.isEmpty()) {
