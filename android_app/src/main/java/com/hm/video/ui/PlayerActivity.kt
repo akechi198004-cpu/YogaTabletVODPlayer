@@ -211,6 +211,9 @@ class PlayerActivity : Activity() {
     }
 
     private fun onPlayerReady() {
+        android.util.Log.i("HMPlayer", "ready durationMs=" + (exoPlayer?.duration ?: 0L) +
+            " positionMs=" + (exoPlayer?.currentPosition ?: 0L) +
+            " line=" + currentLineIndex + " proxy=" + currentlyUsingProxy)
         isVideoPrepared = true
         retryingCurrentLine = false
         terminalPlaybackError = false
@@ -259,6 +262,9 @@ class PlayerActivity : Activity() {
     }
 
     private fun handleStreamFailure(error: androidx.media3.common.PlaybackException) {
+        android.util.Log.w("HMPlayer", "stream failure code=" + error.errorCodeName +
+            " line=" + currentLineIndex + " proxy=" + currentlyUsingProxy +
+            " msg=" + error.message, error)
         val issueHint = if (error.errorCodeName.contains("NETWORK") || error.errorCodeName.contains("TIMEOUT")) {
             "网络连接中断或超时。"
         } else {
@@ -491,6 +497,9 @@ class PlayerActivity : Activity() {
             ?: epUrl.ifBlank { XingfanConfig.SOURCE_BASE }
         httpDataSourceFactory.setDefaultRequestProperties(mapOf("Referer" to referer))
         val playbackUrl = if (useProxy) HlsLocalProxy.getProxyUrl(line.url, referer) else line.url
+        android.util.Log.i("HMPlayer", "start line='" + line.name + "' index=" + lineIndex +
+            " proxy=" + useProxy + " m3u8=" + line.url.contains(".m3u8", true) +
+            " url=" + line.url.take(140))
         try {
             val player = exoPlayer ?: return
             player.stop()
