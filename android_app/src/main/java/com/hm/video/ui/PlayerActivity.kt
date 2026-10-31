@@ -333,8 +333,7 @@ class PlayerActivity : Activity() {
         syncPlaybackButton()
         if (overlay.visibility != View.VISIBLE) btnPlayPause.requestFocus()
         showOverlayWithTimeout()
-        mainHandler.removeCallbacks(updateProgressRunnable)
-        mainHandler.post(updateProgressRunnable)
+        startProgressUpdates()
         HMVideoApplication.instance.storageManager.recordHistory(
             HistoryItem(
                 url = detailUrl,
@@ -795,6 +794,11 @@ class PlayerActivity : Activity() {
         lastProgressSavedAt = now
     }
 
+    private fun startProgressUpdates() {
+        mainHandler.removeCallbacks(updateProgressRunnable)
+        if (activityStarted && isVideoPrepared) mainHandler.post(updateProgressRunnable)
+    }
+
     private fun seekBy(offset: Long) {
         val player = exoPlayer ?: return
         if (!isVideoPrepared || player.duration <= 0) return
@@ -842,6 +846,7 @@ class PlayerActivity : Activity() {
 
     override fun onStop() {
         activityStarted = false
+        mainHandler.removeCallbacks(updateProgressRunnable)
         saveProgress(force = true)
         exoPlayer?.pause()
         // A pause caused by focus loss must not become an automatic resume on return.
@@ -861,6 +866,7 @@ class PlayerActivity : Activity() {
         if (playRequested && !audioFocusRequestFailed) requestAudioFocus()
         applyPlayWhenReady()
         syncPlaybackButton()
+        if (isVideoPrepared) startProgressUpdates()
     }
 
     private fun syncPlaybackButton() {

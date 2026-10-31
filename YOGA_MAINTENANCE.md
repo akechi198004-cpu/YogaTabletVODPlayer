@@ -159,3 +159,30 @@ adb ... pm list features | grep touchscreen                   -> 存在 touchscr
 
 - `build-yoga.ps1` 全通过：assembleDebug、testDebugUnitTest、lintDebug；89 项测试通过，lint 0 错误（133 条警告）。
 - 测试均为 Robolectric/JVM 与本地受控服务，不是 API 19 真机验收。需在 B6000-F 验收真实焦点拒绝/恢复、页面切换时序及实际代理线路行为。
+
+## 第七轮：代码审计与生命周期修补（2026-11-01，基线 3181a4f）
+
+### 审计范围与结论
+
+- 复核构建入口、数据层（XingfanClient/XingfanRepository/XingfanParser）、缓存（MetadataCache/DiskStore/ImageCache/ImageLoader）、播放（PlayerActivity/HlsLocalProxy/MediaStreamProbe/LineProbe）及页面请求取消链路。
+- 本轮审查未发现可复现的 P0 崩溃、数据破坏或安全阻断问题；确认并修复一处 P1 生命周期资源问题。
+
+### 1. PlayerActivity 进度轮询在后台持续调度（P1）
+
+- 问题：`updateProgressRunnable` 在 `onPlayerReady()` 启动后每秒自我重排；`onStop()` 未移除，直到 `onDestroy()` 才停止。页面不可见期间仍会持续唤醒主线程，属于后台资源浪费。
+- 修复：新增 `startProgressUpdates()`，仅在 `activityStarted && isVideoPrepared` 时启动；`onStop()` 移除回调；`onStart()` 在播放器已准备好时恢复。前台进度刷新、暂停落盘和恢复定位行为不变。
+- 回归测试：`progressPollingStopsInBackgroundAndRestartsWhenVisible`，用暂停 Looper 的 `idleFor(6s)` 验证 `onStop` 后队列为空、`onStart` 恢复、再次 `onStop` 清空。已临时撤销修复确认该测试失败，再恢复修复。
+
+### 2. 审计后未修改项
+
+- `HlsLocalProxy` 仅绑定 `127.0.0.1`；未知或异常上游响应回 502，媒体分片与密钥不重写，保持现状。
+- `DiskStore` 的 LRU 字节统计是近似值，读写/裁剪存在并发窗口；缓存异常只按 miss 处理，不影响收藏、历史等业务数据，未扩大改动。
+- 过期 ticket 在网络失败回退时可能短暂读取磁盘缓存，但页面代次校验仍阻止过期结果展示；未改变现有缓存语义。
+- 其余 lint 警告为既有资源、文案、依赖提示，不是本轮确认的缺陷，未做无证据的风格性修改。
+
+### 本轮结果与未验证
+
+- 修改前基线：`build-yoga.ps1` 通过，89 项测试、0 失败，lint 0 错误 / 133 警告。
+- 修改后最终：`build-yoga.ps1` 通过，assembleDebug、testDebugUnitTest、lintDebug 成功；90 项测试、0 失败，lint 0 错误 / 132 警告。
+- APK：`android_app/app/build/outputs/apk/debug/app-debug.apk`，12,819,504 字节，SHA-256 `db071fbd525bbb256d47e76c406a51c4ab5505bfd72c43bfac52e0fbcbcb256d`。
+- 验证为 Robolectric/JVM 与本地受控服务，不是 API 19 真机验收；本轮未安装/更新设备，未访问真实内容站点。后台轮询停止与恢复仍需在 B6000-F 上结合真实播放、返回桌面和锁屏场景确认。

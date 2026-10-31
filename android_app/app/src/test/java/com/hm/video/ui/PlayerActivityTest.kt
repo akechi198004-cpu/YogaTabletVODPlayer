@@ -167,6 +167,23 @@ class PlayerActivityTest {
     }
 
     @Test
+    fun progressPollingStopsInBackgroundAndRestartsWhenVisible() {
+        val mainLooper = shadowOf(Looper.getMainLooper()).apply { pause() }
+
+        call("onPlayerReady")
+        call("onStop")
+        mainLooper.idleFor(Duration.ofSeconds(6))
+        // With the recurring poll still queued, each second would enqueue the next tick and the
+        // looper would never become idle; the one-shot overlay timers have all expired by now.
+        assertTrue("a stopped activity must not keep rescheduling progress updates", mainLooper.isIdle())
+
+        call("onStart")
+        assertFalse("progress polling resumes for an already prepared player", mainLooper.isIdle())
+        call("onStop")
+        assertTrue("onStop must remove the restarted progress callback", mainLooper.isIdle())
+    }
+
+    @Test
     fun terminalRetryReparsesInsteadOfReusingCachedSignedUrl() {
         val version = AtomicInteger(1)
         var base = ""
