@@ -256,4 +256,21 @@
             </LinearLayout>
         </LinearLayout>
     </RelativeLayout>
+
+    <!-- Same top-left back affordance as the detail screen; only on unrecoverable errors. -->
+    <Button
+        android:id="@+id/player_error_back"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:layout_alignParentTop="true"
+        android:layout_alignParentStart="true"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        android:background="@drawable/bg_pill"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:text="@string/player_back"
+        android:textColor="@color/text_white"
+        android:textSize="13sp"
+        android:visibility="gone" />
 </RelativeLayout>

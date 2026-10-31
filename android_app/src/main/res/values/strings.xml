@@ -24,5 +24,5 @@
     <string name="speed">倍速</string>
     <string name="favorite">收藏</string>
     <string name="favorited">已收藏</string>
-    <string name="player_back">返回</string>
+    <string name="player_back">〈 返回</string>
 </resources>

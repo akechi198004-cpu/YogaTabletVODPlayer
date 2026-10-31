@@ -248,7 +248,7 @@ class PlayerActivity : Activity() {
         btnSpeed.text = "${currentSpeed}x"
         btnTopOrientation = findViewById(R.id.player_btn_top_orientation)
         loadingLayout = findViewById(R.id.player_loading_layout)
-        loadingLayout.findViewById<Button>(R.id.loading_back_button).setOnClickListener { finish() }
+        findViewById<Button>(R.id.player_error_back).setOnClickListener { finish() }
         resumeToast = findViewById(R.id.player_resume_toast)
 
         findViewById<TextView>(R.id.player_title).text = workTitle
@@ -538,10 +538,11 @@ class PlayerActivity : Activity() {
         loadingLayout.findViewById<TextView>(R.id.loading_sub_title)?.text = subtitle
         loadingLayout.findViewById<TextView>(R.id.loading_bottom_tip)?.text =
             if (retryAction != null) "按确认键重试 · 点“返回”或按返回键退出播放器" else "按返回键可回到详情页"
-        val backButton = loadingLayout.findViewById<Button>(R.id.loading_back_button)
+        val backButton = findViewById<Button>(R.id.player_error_back)
         backButton.visibility = if (retryAction != null) View.VISIBLE else View.GONE
-        // On a remote, down from the retry overlay reaches the visible back button.
-        loadingLayout.nextFocusDownId = if (retryAction != null) backButton.id else View.NO_ID
+        // Same spot as the detail screen: up from the retry overlay reaches the top-left back.
+        loadingLayout.nextFocusUpId = if (retryAction != null) backButton.id else View.NO_ID
+        backButton.nextFocusDownId = loadingLayout.id
         loadingLayout.isClickable = retryAction != null
         loadingLayout.isFocusable = retryAction != null
         loadingLayout.isFocusableInTouchMode = retryAction != null
@@ -884,7 +885,14 @@ class PlayerActivity : Activity() {
         if (loadingLayout.visibility == View.VISIBLE && keyCode in intArrayOf(
                 KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
                 KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_MENU)) {
-            if (terminalPlaybackError) loadingLayout.requestFocus()
+            if (terminalPlaybackError) {
+                val backButton = findViewById<View>(R.id.player_error_back)
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP && backButton.visibility == View.VISIBLE) {
+                    backButton.requestFocus()
+                } else {
+                    loadingLayout.requestFocus()
+                }
+            }
             return true
         }
         when (keyCode) {

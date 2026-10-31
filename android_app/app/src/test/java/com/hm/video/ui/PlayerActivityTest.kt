@@ -219,7 +219,7 @@ class PlayerActivityTest {
 
     @Test
     fun parseFailureShowsBackButtonAndReturnsToDetail() {
-        val back = activity.findViewById<View>(R.id.loading_back_button)
+        val back = activity.findViewById<View>(R.id.player_error_back)
         val showMessage = PlayerActivity::class.java.declaredMethods
             .first { it.name == "showPlaybackMessage" && it.parameterCount == 3 }
             .apply { isAccessible = true }
@@ -229,7 +229,7 @@ class PlayerActivityTest {
 
         call("showPlaybackMessage", "播放源解析失败", "无法读取播放页面", {})
         assertEquals(View.VISIBLE, back.visibility)
-        assertEquals(back.id, activity.findViewById<View>(R.id.player_loading_layout).nextFocusDownId)
+        assertEquals(back.id, activity.findViewById<View>(R.id.player_loading_layout).nextFocusUpId)
 
         assertTrue(back.performClick())
         assertTrue("back must leave the player", activity.isFinishing)
