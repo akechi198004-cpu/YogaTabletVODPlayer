@@ -217,6 +217,24 @@ class PlayerActivityTest {
         }
     }
 
+    @Test
+    fun parseFailureShowsBackButtonAndReturnsToDetail() {
+        val back = activity.findViewById<View>(R.id.loading_back_button)
+        val showMessage = PlayerActivity::class.java.declaredMethods
+            .first { it.name == "showPlaybackMessage" && it.parameterCount == 3 }
+            .apply { isAccessible = true }
+
+        showMessage.invoke(activity, *arrayOf<Any?>("正在解析播放源", "正在读取线路", null))
+        assertEquals("a loading screen keeps no back button", View.GONE, back.visibility)
+
+        call("showPlaybackMessage", "播放源解析失败", "无法读取播放页面", {})
+        assertEquals(View.VISIBLE, back.visibility)
+        assertEquals(back.id, activity.findViewById<View>(R.id.player_loading_layout).nextFocusDownId)
+
+        assertTrue(back.performClick())
+        assertTrue("back must leave the player", activity.isFinishing)
+    }
+
     // ---------------------------------------------------------------
     // Reordering state after a background kill
     // ---------------------------------------------------------------

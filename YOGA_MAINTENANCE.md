@@ -186,3 +186,11 @@ adb ... pm list features | grep touchscreen                   -> 存在 touchscr
 - 修改后最终：`build-yoga.ps1` 通过，assembleDebug、testDebugUnitTest、lintDebug 成功；90 项测试、0 失败，lint 0 错误 / 132 警告。
 - APK：`android_app/app/build/outputs/apk/debug/app-debug.apk`，12,819,504 字节，SHA-256 `db071fbd525bbb256d47e76c406a51c4ab5505bfd72c43bfac52e0fbcbcb256d`。
 - 验证为 Robolectric/JVM 与本地受控服务，不是 API 19 真机验收；本轮未安装/更新设备，未访问真实内容站点。后台轮询停止与恢复仍需在 B6000-F 上结合真实播放、返回桌面和锁屏场景确认。
+
+## 第八轮：解析失败界面增加返回入口（2026-11-01，基线 ef6ed8a）
+
+- 问题：播放源解析失败、无可用线路或线路全部失败时，整屏错误卡片只能点击重试，没有可点的返回入口，只能依赖系统返回键。
+- 修改：`layout_loading_view.xml` 增加 `loading_back_button`，默认隐藏；仅 `showPlaybackMessage()` 处于可重试错误态时显示，点击 `finish()` 返回详情页。加载中与正常播放态不显示。底部提示同步改为“按确认键重试 · 点‘返回’或按返回键退出播放器”。
+- 遥控可达性：错误态下加载层 `nextFocusDownId` 指向返回按钮，按方向键下可聚焦；触摸可直接点击。
+- 回归测试：`parseFailureShowsBackButtonAndReturnsToDetail`，验证加载态隐藏、错误态显示与焦点指向、点击后 Activity 进入 finishing。
+- 验证：`build-yoga.ps1` 通过，91 项测试 0 失败，lint 0 错误 / 132 警告；APK 12,820,418 字节，SHA-256 `a281693260d4cb5d4f25225bbea0d1900aca07ef78da33ba525f1b658fe3a7b9`。仅为 Robolectric/JVM 验证，未安装设备；真机需确认错误态按钮的触控与遥控焦点表现。

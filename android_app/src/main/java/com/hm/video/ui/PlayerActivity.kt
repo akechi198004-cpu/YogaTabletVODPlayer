@@ -248,6 +248,7 @@ class PlayerActivity : Activity() {
         btnSpeed.text = "${currentSpeed}x"
         btnTopOrientation = findViewById(R.id.player_btn_top_orientation)
         loadingLayout = findViewById(R.id.player_loading_layout)
+        loadingLayout.findViewById<Button>(R.id.loading_back_button).setOnClickListener { finish() }
         resumeToast = findViewById(R.id.player_resume_toast)
 
         findViewById<TextView>(R.id.player_title).text = workTitle
@@ -536,7 +537,11 @@ class PlayerActivity : Activity() {
         loadingLayout.findViewById<TextView>(R.id.loading_main_title)?.text = title
         loadingLayout.findViewById<TextView>(R.id.loading_sub_title)?.text = subtitle
         loadingLayout.findViewById<TextView>(R.id.loading_bottom_tip)?.text =
-            if (retryAction != null) "按确认键或点击此处重试 · 按返回键退出播放器" else "按返回键可回到详情页"
+            if (retryAction != null) "按确认键重试 · 点“返回”或按返回键退出播放器" else "按返回键可回到详情页"
+        val backButton = loadingLayout.findViewById<Button>(R.id.loading_back_button)
+        backButton.visibility = if (retryAction != null) View.VISIBLE else View.GONE
+        // On a remote, down from the retry overlay reaches the visible back button.
+        loadingLayout.nextFocusDownId = if (retryAction != null) backButton.id else View.NO_ID
         loadingLayout.isClickable = retryAction != null
         loadingLayout.isFocusable = retryAction != null
         loadingLayout.isFocusableInTouchMode = retryAction != null
