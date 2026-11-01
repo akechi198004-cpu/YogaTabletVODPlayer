@@ -3,8 +3,9 @@
 //! 桌面版不嵌入 libVLC：进程启动 VLC，把媒体直链、Referer 和标题传过去。
 //! 这样低配 Win32 平板可以把解码交给 VLC，避免浏览器/内嵌播放器的兼容问题。
 
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use thiserror::Error;
 use url::Url;
@@ -58,13 +59,13 @@ pub fn find_vlc() -> Option<PathBuf> {
     }
 }
 
-/// 启动 VLC。返回后不等待播放器退出。
+/// 启动 VLC。返回子进程句柄，调用方负责在换集/退出时结束它。
 pub fn launch_vlc(
     vlc_path: &str,
     media_url: &str,
     media_title: &str,
     referer: Option<&str>,
-) -> Result<(), PlayerError> {
+) -> Result<Child, PlayerError> {
     let executable = resolve_executable(vlc_path)?;
     let mut command = Command::new(&executable);
 
@@ -86,8 +87,72 @@ pub fn launch_vlc(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(PlayerError::LaunchFailed)?;
-    Ok(())
+        .map_err(PlayerError::LaunchFailed)
+}
+
+/// 在用户选择的目录（或其上级目录）中查找 vlc.exe。
+///
+/// 先检查常见布局，再在最多两层子目录里查找，兼容便携版解压到自定义文件夹。
+pub fn find_vlc_in_dir(dir: &Path) -> Option<PathBuf> {
+    for candidate in [
+        dir.join("vlc.exe"),
+        dir.join("VLC").join("vlc.exe"),
+        dir.join("VideoLAN").join("VLC").join("vlc.exe"),
+    ] {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let mut pending = vec![(dir.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((current, depth)) = pending.pop() {
+        if depth >= 2 || visited >= 400 {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let child = entry.path();
+            let candidate = child.join("vlc.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            pending.push((child, depth + 1));
+        }
+    }
+    None
+}
+
+/// 校验路径确实是 vlc.exe（开发环境的 Linux VLC 允许无扩展名）。
+pub fn validate_vlc_path(path: &str) -> Result<PathBuf, PlayerError> {
+    let trimmed = path.trim().trim_matches('"').trim();
+    if trimmed.is_empty() {
+        return Err(PlayerError::MissingPath);
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_file() {
+        return Err(PlayerError::MissingExecutable(trimmed.to_owned()));
+    }
+    let is_vlc = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("vlc.exe")
+                || (!cfg!(target_os = "windows") && name.eq_ignore_ascii_case("vlc"))
+        });
+    if !is_vlc {
+        return Err(PlayerError::NotVlc(trimmed.to_owned()));
+    }
+    Ok(path)
 }
 
 fn resolve_executable(vlc_path: &str) -> Result<PathBuf, PlayerError> {
@@ -205,6 +270,8 @@ pub enum PlayerError {
     MissingPath,
     #[error("找不到 VLC 可执行文件：{0}")]
     MissingExecutable(String),
+    #[error("所选文件不是 vlc.exe：{0}")]
+    NotVlc(String),
     #[error("启动 VLC 失败：{0}")]
     LaunchFailed(std::io::Error),
 }
@@ -231,6 +298,87 @@ mod tests {
             line_labels(&lines),
             vec!["svipplay(1)", "svipplay(2)", "jisuzyv"]
         );
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hm-vod-player-test-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn finds_vlc_in_common_and_nested_layouts() {
+        let root = temp_dir("find-vlc");
+        let direct = root.join("direct");
+        fs::create_dir_all(&direct).expect("create direct dir");
+        let direct_exe = direct.join("vlc.exe");
+        fs::write(&direct_exe, b"test").expect("write direct vlc");
+        assert_eq!(find_vlc_in_dir(&direct), Some(direct_exe));
+
+        let nested = root.join("nested");
+        let video_lan_vlc = nested.join("VideoLAN").join("VLC");
+        fs::create_dir_all(&video_lan_vlc).expect("create VideoLAN dir");
+        let nested_exe = video_lan_vlc.join("vlc.exe");
+        fs::write(&nested_exe, b"test").expect("write nested vlc");
+        assert_eq!(find_vlc_in_dir(&nested), Some(nested_exe));
+
+        let portable = root.join("portable");
+        let portable_vlc = portable.join("apps").join("vlc-3.0.21");
+        fs::create_dir_all(&portable_vlc).expect("create portable dir");
+        let portable_exe = portable_vlc.join("vlc.exe");
+        fs::write(&portable_exe, b"test").expect("write portable vlc");
+        assert_eq!(find_vlc_in_dir(&portable), Some(portable_exe));
+
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).expect("create empty dir");
+        assert_eq!(find_vlc_in_dir(&empty), None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handles_chinese_and_space_paths() {
+        let root = temp_dir("中文 路径");
+        let install = root.join("VLC 安装 目录");
+        fs::create_dir_all(&install).expect("create unicode dir");
+        let exe = install.join("vlc.exe");
+        fs::write(&exe, b"test").expect("write unicode vlc");
+        assert_eq!(find_vlc_in_dir(&install), Some(exe.clone()));
+        assert_eq!(
+            validate_vlc_path(&exe.to_string_lossy()).expect("unicode vlc"),
+            exe
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validates_vlc_executable_name() {
+        let root = temp_dir("validate-vlc");
+        let not_vlc = root.join("player.exe");
+        fs::write(&not_vlc, b"test").expect("write other exe");
+        assert!(matches!(
+            validate_vlc_path(&not_vlc.to_string_lossy()),
+            Err(PlayerError::NotVlc(_))
+        ));
+
+        let vlc = root.join("vlc.exe");
+        fs::write(&vlc, b"test").expect("write vlc");
+        assert_eq!(
+            validate_vlc_path(&vlc.to_string_lossy()).expect("valid vlc"),
+            vlc
+        );
+        assert!(matches!(
+            validate_vlc_path(&root.join("missing.exe").to_string_lossy()),
+            Err(PlayerError::MissingExecutable(_))
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

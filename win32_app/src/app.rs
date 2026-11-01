@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Child;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -12,7 +13,10 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 
 use crate::cache::{DecodedPoster, MetadataCache, PosterCache};
-use crate::config::{now_unix, AppConfig, ThemeMode, UserData};
+use crate::config::{now_unix, AppConfig, PlayerBackend, ThemeMode, UserData};
+use crate::embedded::{
+    EmbeddedEvent, EmbeddedPlayer, EndReason, LoadOptions, PlayerProperty, VideoWindow,
+};
 use crate::models::{
     BrowseKind, CategoryState, Episode, FavoriteItem, FilterOptions, HistoryItem, MainTab, MineTab,
     PlayInfo, SearchKind, SearchState, WorkDetail, WorkItem,
@@ -35,6 +39,20 @@ const DAILY_PAGE_SIZE: usize = 24;
 const POSTER_RETRY_BASE: Duration = Duration::from_secs(2);
 const POSTER_RETRY_MAX: Duration = Duration::from_secs(300);
 
+#[cfg(windows)]
+fn window_handle(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn window_handle(_cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TopPeriod {
     Day,
@@ -56,18 +74,18 @@ impl TopPeriod {
 #[derive(Clone, Debug)]
 pub struct SettingsDraft {
     pub source_base: String,
+    pub player_backend: PlayerBackend,
     pub vlc_path: String,
     pub theme: ThemeMode,
-    pub detected_vlc: Option<String>,
 }
 
 impl SettingsDraft {
     fn from_config(config: &AppConfig) -> Self {
         Self {
             source_base: config.source_base.clone(),
+            player_backend: config.player_backend,
             vlc_path: config.vlc_path.clone(),
             theme: config.theme,
-            detected_vlc: None,
         }
     }
 
@@ -78,6 +96,7 @@ impl SettingsDraft {
         if config.source_base.is_empty() {
             config.source_base = crate::config::DEFAULT_SOURCE_BASE.to_owned();
         }
+        config.player_backend = self.player_backend;
         config.vlc_path = self.vlc_path;
         config.theme = self.theme;
         old_base != config.source_base_trimmed()
@@ -138,6 +157,51 @@ struct PlayDialog {
     probing: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlayerStatus {
+    Opening,
+    Playing,
+    Paused,
+    Ended,
+    Failed,
+}
+
+/// 内置播放会话。`session` 与 mpv 的 load_id 一致，旧会话事件直接丢弃。
+#[derive(Clone)]
+struct PlayerView {
+    session: u64,
+    work: WorkItem,
+    episode_url: String,
+    episode_title: String,
+    episode_no: u32,
+    line_name: String,
+    line_index: usize,
+    info: PlayInfo,
+    media_url: String,
+    media_title: String,
+    referer: Option<String>,
+    status: PlayerStatus,
+    error: Option<String>,
+    duration: Option<f64>,
+    position: f64,
+    seek_target: Option<f64>,
+    volume: u8,
+    started_at: Instant,
+}
+
+#[derive(Clone)]
+struct PlaySelection {
+    work: WorkItem,
+    episode_url: String,
+    episode_title: String,
+    episode_no: u32,
+    line: crate::models::PlayLine,
+    line_index: usize,
+    info: PlayInfo,
+    referer: Option<String>,
+    media_title: String,
+}
+
 #[derive(Clone, Debug)]
 enum ConfirmAction {
     ClearHistory,
@@ -168,6 +232,14 @@ pub struct App {
     browse: BrowseState,
     detail: Option<DetailView>,
     play: Option<PlayDialog>,
+    player_view: Option<PlayerView>,
+    embedded: Option<EmbeddedPlayer>,
+    external_vlc: Option<Child>,
+    video_window: VideoWindow,
+    window_hwnd: Option<isize>,
+    player_seq: u64,
+    window_fullscreen: bool,
+    settings_notice: Option<(String, bool)>,
     selected_url: Option<String>,
     show_settings: bool,
     settings_draft: Option<SettingsDraft>,
@@ -232,12 +304,6 @@ impl App {
         let _ = metadata_cache.ensure_dir();
         let _ = poster_cache.ensure_dir();
 
-        let mut config = config;
-        let detected_vlc = config.vlc_path.trim().is_empty() && config.ensure_vlc_path();
-        if detected_vlc && config_error.is_none() {
-            let _ = config.save(&paths.config_file);
-        }
-
         // 后台清理缓存，避免 2GB 机器被历史海报占满。
         {
             let metadata = metadata_cache.clone();
@@ -286,6 +352,14 @@ impl App {
             browse: BrowseState::default(),
             detail: None,
             play: None,
+            player_view: None,
+            embedded: None,
+            external_vlc: None,
+            video_window: VideoWindow::new(),
+            window_hwnd: window_handle(cc),
+            player_seq: 0,
+            window_fullscreen: false,
+            settings_notice: None,
             selected_url: None,
             show_settings: false,
             settings_draft: None,
@@ -729,33 +803,15 @@ impl App {
             .store(self.play_seq, Ordering::SeqCst);
     }
 
-    fn launch_line(&mut self, index: usize) {
-        let Some(dialog) = self.play.as_ref() else {
-            return;
-        };
-        let Some(info) = dialog.info.as_ref() else {
-            return;
-        };
-        let Some(line) = info.lines.get(index) else {
-            return;
-        };
-        let line = line.clone();
+    fn play_selection(&self, index: usize) -> Option<PlaySelection> {
+        let dialog = self.play.as_ref()?;
+        let info = dialog.info.as_ref()?;
+        let line = info.lines.get(index)?.clone();
+        if line.url.trim().is_empty() {
+            return None;
+        }
         let referer = info.service_url.clone();
-        let media_title = {
-            let work = if info.work_title.trim().is_empty() {
-                &dialog.work.title
-            } else {
-                &info.work_title
-            };
-            let episode = if info.episode_title.trim().is_empty() {
-                &dialog.episode_title
-            } else {
-                &info.episode_title
-            };
-            format!("{work} · {episode}")
-        };
         let work = dialog.work.clone();
-        let episode_url = dialog.episode_url.clone();
         let episode_title = if info.episode_title.trim().is_empty() {
             dialog.episode_title.clone()
         } else {
@@ -766,51 +822,619 @@ impl App {
         } else {
             info.episode_no
         };
+        let title = if info.work_title.trim().is_empty() {
+            work.title.clone()
+        } else {
+            info.work_title.clone()
+        };
+        Some(PlaySelection {
+            work,
+            episode_url: dialog.episode_url.clone(),
+            episode_title: episode_title.clone(),
+            episode_no,
+            line,
+            line_index: index,
+            info: info.clone(),
+            referer,
+            media_title: format!("{title} · {episode_title}"),
+        })
+    }
 
-        if self.config.vlc_path_trimmed().is_empty() {
-            self.config.ensure_vlc_path();
-            if !self.config.vlc_path_trimmed().is_empty() && !self.config_load_failed {
-                let _ = self.config.save(&self.config_path);
-            }
-        }
-        if self.config.vlc_path_trimmed().is_empty() {
+    fn launch_line(&mut self, index: usize) {
+        let Some(selection) = self.play_selection(index) else {
             if let Some(dialog) = self.play.as_mut() {
-                dialog.error = Some(
-                    "还没有配置 VLC。请点右上角「设置」填写 vlc.exe 路径，或点「自动检测」。"
-                        .to_owned(),
-                );
+                dialog.error = Some("这条线路没有可播放的媒体地址。".to_owned());
             }
             return;
+        };
+        match self.config.player_backend {
+            PlayerBackend::Embedded => self.launch_embedded(selection),
+            PlayerBackend::ExternalVlc => self.launch_external(selection),
         }
+    }
 
-        let vlc_path = self.config.vlc_path.clone();
-        match player::launch_vlc(&vlc_path, &line.url, &media_title, referer.as_deref()) {
-            Ok(()) => {
-                let history = HistoryItem {
-                    url: work.url.clone(),
-                    title: work.title.clone(),
-                    poster: work.poster.clone(),
-                    category: work.category.clone(),
-                    year: work.year.clone(),
-                    area: work.area.clone(),
-                    line_name: Some(line.name.clone()),
-                    episode_no,
-                    episode_title: episode_title.clone(),
-                    episode_url,
-                    played_at: now_unix(),
-                };
-                self.error_text = None;
-                self.user_data.record_history(history);
-                self.save_user_data();
+    fn ensure_embedded_player(&mut self) -> Result<(), String> {
+        if self.embedded.is_some() {
+            return Ok(());
+        }
+        let Some(hwnd) = self.window_hwnd else {
+            return Err("无法取得应用主窗口句柄，内置播放不可用。".to_owned());
+        };
+        self.video_window
+            .ensure(hwnd)
+            .map_err(|error| format!("创建视频窗口失败：{error}"))?;
+        let player = EmbeddedPlayer::new().map_err(|error| error.to_string())?;
+        player.set_video_window(self.video_window.hwnd());
+        player.set_volume(self.config.embedded_volume);
+        self.embedded = Some(player);
+        Ok(())
+    }
+
+    fn player_view_from_selection(
+        &self,
+        selection: PlaySelection,
+        session: u64,
+        status: PlayerStatus,
+    ) -> PlayerView {
+        PlayerView {
+            session,
+            work: selection.work,
+            episode_url: selection.episode_url,
+            episode_title: selection.episode_title,
+            episode_no: selection.episode_no,
+            line_name: selection.line.name,
+            line_index: selection.line_index,
+            info: selection.info,
+            media_url: selection.line.url,
+            media_title: selection.media_title,
+            referer: selection.referer,
+            status,
+            error: None,
+            duration: None,
+            position: 0.0,
+            seek_target: None,
+            volume: self.config.embedded_volume,
+            started_at: Instant::now(),
+        }
+    }
+
+    fn launch_embedded(&mut self, selection: PlaySelection) {
+        let session = self.next_player_session();
+        self.stop_external_vlc();
+        self.video_window.hide();
+        if let Err(error) = self.ensure_embedded_player() {
+            self.show_embedded_failure(selection, session, error);
+            return;
+        }
+        let referer = selection.referer.clone().unwrap_or_default();
+        if let Some(player) = &self.embedded {
+            player.set_volume(self.config.embedded_volume);
+            player.load(
+                session,
+                LoadOptions {
+                    url: selection.line.url.clone(),
+                    user_agent: crate::source::USER_AGENT.to_owned(),
+                    referer,
+                    disable_hw_decode: false,
+                },
+            );
+        }
+        self.save_play_history(&selection);
+        let title = selection.work.title.clone();
+        let episode = selection.episode_title.clone();
+        self.player_view =
+            Some(self.player_view_from_selection(selection, session, PlayerStatus::Opening));
+        self.play = None;
+        self.show_search_history = false;
+        self.error_text = None;
+        self.status_text = format!("内置播放器正在连接《{title} · {episode}》…");
+    }
+
+    fn show_embedded_failure(&mut self, selection: PlaySelection, session: u64, error: String) {
+        if let Some(player) = &self.embedded {
+            player.stop();
+        }
+        self.video_window.hide();
+        let mut view = self.player_view_from_selection(selection, session, PlayerStatus::Failed);
+        view.error = Some(format!(
+            "{error}\n\n不会自动启动外部 VLC；可点击下方「改用 VLC 播放」，或到设置中切换播放方式。"
+        ));
+        self.player_view = Some(view);
+        self.play = None;
+        self.show_search_history = false;
+        self.error_text = None;
+        self.status_text = "内置播放器不可用".to_owned();
+    }
+
+    fn launch_external(&mut self, selection: PlaySelection) {
+        self.stop_external_vlc();
+        match self.launch_vlc_for(&selection) {
+            Ok(child) => {
+                self.external_vlc = Some(child);
+                self.save_play_history(&selection);
+                let title = selection.work.title.clone();
+                let episode = selection.episode_title.clone();
                 self.close_play();
-                self.status_text = format!("已用 VLC 打开《{} · {}》", work.title, episode_title);
+                self.error_text = None;
+                self.status_text = format!("已用 VLC 打开《{title} · {episode}》");
             }
             Err(error) => {
                 if let Some(dialog) = self.play.as_mut() {
-                    dialog.error = Some(format!("{error}"));
+                    dialog.error = Some(error);
                 }
             }
         }
+    }
+
+    fn launch_vlc_for(&mut self, selection: &PlaySelection) -> Result<Child, String> {
+        if self.config.vlc_path_trimmed().is_empty() && self.config.ensure_vlc_path() {
+            self.save_config_silently();
+        }
+        if self.config.vlc_path_trimmed().is_empty() {
+            return Err(
+                "未找到 VLC。请到设置中点击「选择文件」或「选择安装目录」定位 vlc.exe。".to_owned(),
+            );
+        }
+        let vlc_path = self.config.vlc_path.clone();
+        if let Err(error) = player::validate_vlc_path(&vlc_path) {
+            return Err(format!(
+                "{error}。请到设置中重新选择 vlc.exe 或 VLC 安装目录。"
+            ));
+        }
+        player::launch_vlc(
+            &vlc_path,
+            &selection.line.url,
+            &selection.media_title,
+            selection.referer.as_deref(),
+        )
+        .map_err(|error| format!("{error}"))
+    }
+
+    fn save_play_history(&mut self, selection: &PlaySelection) {
+        let history = HistoryItem {
+            url: selection.work.url.clone(),
+            title: selection.work.title.clone(),
+            poster: selection.work.poster.clone(),
+            category: selection.work.category.clone(),
+            year: selection.work.year.clone(),
+            area: selection.work.area.clone(),
+            line_name: Some(selection.line.name.clone()),
+            episode_no: selection.episode_no,
+            episode_title: selection.episode_title.clone(),
+            episode_url: selection.episode_url.clone(),
+            played_at: now_unix(),
+        };
+        self.user_data.record_history(history);
+        self.save_user_data();
+    }
+
+    fn next_player_session(&mut self) -> u64 {
+        self.player_seq = self.player_seq.wrapping_add(1);
+        self.player_seq
+    }
+
+    fn stop_external_vlc(&mut self) {
+        if let Some(mut child) = self.external_vlc.take() {
+            let _ = child.kill();
+            let _ = thread::Builder::new()
+                .name("hm-vlc-reaper".to_owned())
+                .spawn(move || {
+                    let _ = child.wait();
+                });
+        }
+    }
+
+    fn restart_player_line(&mut self) {
+        let Some(view) = self.player_view.as_ref() else {
+            return;
+        };
+        if view.info.lines.len() < 2 {
+            return;
+        }
+        let mut next = view.line_index;
+        let mut chosen = None;
+        for _ in 0..view.info.lines.len() {
+            next = (next + 1) % view.info.lines.len();
+            let line = &view.info.lines[next];
+            if !line.url.trim().is_empty() {
+                chosen = Some(line.clone());
+                break;
+            }
+        }
+        let Some(line) = chosen else {
+            if let Some(view) = self.player_view.as_mut() {
+                view.error = Some("所有线路都没有可播放的媒体地址。".to_owned());
+            }
+            return;
+        };
+        let selection = PlaySelection {
+            work: view.work.clone(),
+            episode_url: view.episode_url.clone(),
+            episode_title: view.episode_title.clone(),
+            episode_no: view.episode_no,
+            line,
+            line_index: next,
+            info: view.info.clone(),
+            referer: view.referer.clone(),
+            media_title: view.media_title.clone(),
+        };
+        if self.embedded.is_none() {
+            self.launch_embedded(selection);
+            return;
+        }
+        let session = self.next_player_session();
+        let referer = selection.referer.clone().unwrap_or_default();
+        self.video_window.hide();
+        if let Some(player) = &self.embedded {
+            player.load(
+                session,
+                LoadOptions {
+                    url: selection.line.url.clone(),
+                    user_agent: crate::source::USER_AGENT.to_owned(),
+                    referer,
+                    disable_hw_decode: false,
+                },
+            );
+        }
+        self.save_play_history(&selection);
+        if let Some(view) = self.player_view.as_mut() {
+            view.session = session;
+            view.line_name = selection.line.name.clone();
+            view.line_index = selection.line_index;
+            view.media_url = selection.line.url.clone();
+            view.status = PlayerStatus::Opening;
+            view.error = None;
+            view.duration = None;
+            view.position = 0.0;
+            view.seek_target = None;
+            view.started_at = Instant::now();
+        }
+        self.error_text = None;
+        self.status_text = format!("正在切换线路：{}…", selection.line.name);
+    }
+
+    fn fallback_player_to_vlc(&mut self, ctx: &egui::Context) {
+        let Some(view) = self.player_view.as_ref() else {
+            return;
+        };
+        let line = view
+            .info
+            .lines
+            .get(view.line_index)
+            .cloned()
+            .unwrap_or_else(|| crate::models::PlayLine {
+                name: view.line_name.clone(),
+                url: view.media_url.clone(),
+            });
+        let selection = PlaySelection {
+            work: view.work.clone(),
+            episode_url: view.episode_url.clone(),
+            episode_title: view.episode_title.clone(),
+            episode_no: view.episode_no,
+            line,
+            line_index: view.line_index,
+            info: view.info.clone(),
+            referer: view.referer.clone(),
+            media_title: view.media_title.clone(),
+        };
+        if let Some(player) = &self.embedded {
+            player.stop();
+        }
+        self.video_window.hide();
+        match self.launch_vlc_for(&selection) {
+            Ok(child) => {
+                self.external_vlc = Some(child);
+                self.save_play_history(&selection);
+                self.player_view = None;
+                self.next_player_session();
+                self.exit_fullscreen(ctx);
+                self.error_text = None;
+                self.status_text = format!(
+                    "已改用外部 VLC 播放《{} · {}》",
+                    selection.work.title, selection.episode_title
+                );
+            }
+            Err(error) => {
+                if let Some(view) = self.player_view.as_mut() {
+                    view.error = Some(format!(
+                        "{error}\n\n不会自动启动外部 VLC；请修复 VLC 路径后再次点击「改用 VLC 播放」。"
+                    ));
+                }
+            }
+        }
+    }
+
+    fn close_player(&mut self, ctx: &egui::Context) {
+        if let Some(player) = &self.embedded {
+            player.stop();
+        }
+        self.video_window.hide();
+        self.exit_fullscreen(ctx);
+        self.player_view = None;
+        self.next_player_session();
+        self.status_text = "已退出播放".to_owned();
+    }
+
+    /// 设置页切换源等场景下静默结束播放，不发送窗口命令。
+    fn stop_player_silent(&mut self) {
+        if let Some(player) = &self.embedded {
+            player.stop();
+        }
+        self.video_window.hide();
+        self.player_view = None;
+        self.next_player_session();
+        self.window_fullscreen = false;
+    }
+
+    fn toggle_player_pause(&mut self) {
+        let Some(view) = self.player_view.as_ref() else {
+            return;
+        };
+        if !matches!(
+            view.status,
+            PlayerStatus::Opening | PlayerStatus::Playing | PlayerStatus::Paused
+        ) {
+            return;
+        }
+        let next = view.status != PlayerStatus::Paused;
+        if let Some(player) = &self.embedded {
+            player.pause(next);
+        }
+        if let Some(view) = self.player_view.as_mut() {
+            view.status = if next {
+                PlayerStatus::Paused
+            } else {
+                PlayerStatus::Playing
+            };
+            self.status_text = if next {
+                format!("已暂停：{}", view.episode_title)
+            } else {
+                format!("继续播放：{}", view.episode_title)
+            };
+        }
+    }
+
+    fn seek_player(&mut self, seconds: f64) {
+        let seconds = seconds.max(0.0);
+        if let Some(player) = &self.embedded {
+            player.seek(seconds);
+        }
+        if let Some(view) = self.player_view.as_mut() {
+            view.position = seconds;
+            view.seek_target = None;
+        }
+    }
+
+    fn set_player_volume(&mut self, volume: u8) {
+        let volume = volume.min(100);
+        self.config.embedded_volume = volume;
+        if let Some(player) = &self.embedded {
+            player.set_volume(volume);
+        }
+        if let Some(view) = self.player_view.as_mut() {
+            view.volume = volume;
+        }
+    }
+
+    fn replay_player(&mut self) {
+        let Some(view) = self.player_view.as_ref() else {
+            return;
+        };
+        let line = view
+            .info
+            .lines
+            .get(view.line_index)
+            .cloned()
+            .unwrap_or_else(|| crate::models::PlayLine {
+                name: view.line_name.clone(),
+                url: view.media_url.clone(),
+            });
+        let selection = PlaySelection {
+            work: view.work.clone(),
+            episode_url: view.episode_url.clone(),
+            episode_title: view.episode_title.clone(),
+            episode_no: view.episode_no,
+            line,
+            line_index: view.line_index,
+            info: view.info.clone(),
+            referer: view.referer.clone(),
+            media_title: view.media_title.clone(),
+        };
+        self.launch_embedded(selection);
+    }
+
+    fn toggle_player_fullscreen(&mut self, ctx: &egui::Context) {
+        if self.player_view.is_none() {
+            return;
+        }
+        self.window_fullscreen = !self.window_fullscreen;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.window_fullscreen));
+    }
+
+    fn exit_fullscreen(&mut self, ctx: &egui::Context) {
+        if self.window_fullscreen {
+            self.window_fullscreen = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+    }
+
+    fn update_player_bounds(&mut self, rect: Option<egui::Rect>, ctx: &egui::Context) {
+        let visible = self.player_view.as_ref().is_some_and(|view| {
+            view.error.is_none()
+                && matches!(
+                    view.status,
+                    PlayerStatus::Opening | PlayerStatus::Playing | PlayerStatus::Paused
+                )
+        });
+        if !visible || self.embedded.is_none() {
+            self.video_window.hide();
+            return;
+        }
+        let Some(rect) = rect else {
+            self.video_window.hide();
+            return;
+        };
+        let ppp = ctx.pixels_per_point();
+        let x = (rect.min.x * ppp).round() as i32;
+        let y = (rect.min.y * ppp).round() as i32;
+        let width = (rect.width() * ppp).round() as i32;
+        let height = (rect.height() * ppp).round() as i32;
+        if width > 0 && height > 0 {
+            self.video_window.set_bounds(Some((x, y, width, height)));
+        } else {
+            self.video_window.hide();
+        }
+    }
+
+    fn poll_player_events(&mut self, ctx: &egui::Context) {
+        let mut events = Vec::new();
+        if let Some(player) = &self.embedded {
+            while let Some(event) = player.try_recv() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            self.handle_player_event(event, ctx);
+        }
+        let opening_timeout = self.player_view.as_ref().is_some_and(|view| {
+            view.status == PlayerStatus::Opening
+                && view.started_at.elapsed() > Duration::from_secs(30)
+        });
+        if opening_timeout {
+            self.fail_player(
+                "连接内置播放器超时，可能是线路不可用或网络过慢。".to_owned(),
+                ctx,
+            );
+        }
+    }
+
+    fn handle_player_event(&mut self, event: EmbeddedEvent, ctx: &egui::Context) {
+        let Some(session) = self.player_view.as_ref().map(|view| view.session) else {
+            return;
+        };
+        let mut failure = None;
+        let mut ended = false;
+        if let Some(view) = self.player_view.as_mut() {
+            match event {
+                EmbeddedEvent::Loading { load_id } => {
+                    if load_id == session && view.status == PlayerStatus::Opening {
+                        self.status_text = format!("正在缓冲：{}…", view.episode_title);
+                    }
+                }
+                EmbeddedEvent::Playing { load_id } => {
+                    if load_id == session && view.status == PlayerStatus::Opening {
+                        view.status = PlayerStatus::Playing;
+                        self.status_text = format!("正在播放：{}", view.episode_title);
+                    }
+                }
+                EmbeddedEvent::Property { load_id, property } => {
+                    if load_id != session {
+                        return;
+                    }
+                    match property {
+                        PlayerProperty::TimePos(value) => {
+                            if value.is_finite() && value >= 0.0 && view.seek_target.is_none() {
+                                view.position = value;
+                            }
+                        }
+                        PlayerProperty::Duration(value) => {
+                            view.duration = value.filter(|value| *value > 0.0 && value.is_finite());
+                        }
+                        PlayerProperty::Pause(paused) => {
+                            if paused
+                                && matches!(
+                                    view.status,
+                                    PlayerStatus::Opening | PlayerStatus::Playing
+                                )
+                            {
+                                view.status = PlayerStatus::Paused;
+                            } else if !paused && view.status == PlayerStatus::Paused {
+                                view.status = PlayerStatus::Playing;
+                            }
+                        }
+                        PlayerProperty::Volume(value) => {
+                            if value.is_finite() {
+                                view.volume = value.round().clamp(0.0, 100.0) as u8;
+                            }
+                        }
+                    }
+                }
+                EmbeddedEvent::Ended {
+                    load_id,
+                    reason,
+                    error,
+                } => {
+                    if load_id != session {
+                        return;
+                    }
+                    match reason {
+                        EndReason::Eof => ended = true,
+                        EndReason::Error => {
+                            failure = Some(format!(
+                                "播放器无法继续解码该视频{}。",
+                                error.map(|error| format!("：{error}")).unwrap_or_default()
+                            ));
+                        }
+                        EndReason::Stop | EndReason::Quit => {
+                            failure = Some("播放器已停止，线路可能不可用或媒体已结束。".to_owned());
+                        }
+                        EndReason::Redirect => {}
+                    }
+                }
+                EmbeddedEvent::ProcessExited { load_id, code } => {
+                    if load_id == session && view.status != PlayerStatus::Ended {
+                        failure = Some(format!(
+                            "内置播放器进程意外退出（退出码 {}）。",
+                            code.map(|code| code.to_string())
+                                .unwrap_or_else(|| "未知".to_owned())
+                        ));
+                    }
+                }
+                EmbeddedEvent::Error { load_id, message } => {
+                    if load_id == session {
+                        failure = Some(format!("内置播放器错误：{message}"));
+                    }
+                }
+            }
+        }
+        if let Some(message) = failure {
+            self.fail_player(message, ctx);
+        } else if ended {
+            self.finish_player(ctx);
+        }
+    }
+
+    fn finish_player(&mut self, _ctx: &egui::Context) {
+        if let Some(view) = self.player_view.as_mut() {
+            view.status = PlayerStatus::Ended;
+            view.seek_target = None;
+            if let Some(duration) = view.duration {
+                view.position = duration;
+            }
+        }
+        self.video_window.hide();
+        if let Some(player) = &self.embedded {
+            player.stop();
+        }
+        self.status_text = "播放结束".to_owned();
+    }
+
+    fn fail_player(&mut self, message: String, ctx: &egui::Context) {
+        if let Some(view) = self.player_view.as_mut() {
+            if view.status == PlayerStatus::Failed {
+                return;
+            }
+            view.status = PlayerStatus::Failed;
+            view.error = Some(format!(
+                "{message}\n\n不会自动启动外部 VLC；可点击下方「改用 VLC 播放」，或到设置中切换播放方式。"
+            ));
+        }
+        self.video_window.hide();
+        if let Some(player) = &self.embedded {
+            player.stop();
+        }
+        self.exit_fullscreen(ctx);
+        self.status_text = "内置播放失败".to_owned();
     }
 
     fn toggle_favorite_current(&mut self) {
@@ -968,6 +1592,7 @@ impl App {
         if self.settings_draft.is_none() {
             self.settings_draft = Some(SettingsDraft::from_config(&self.config));
         }
+        self.settings_notice = None;
         self.show_settings = true;
         self.show_search_history = false;
     }
@@ -976,13 +1601,11 @@ impl App {
         let previous_base = self.config.source_base_trimmed();
         let theme_mode = draft.theme;
         let base_changed = draft.apply(&mut self.config);
-        if self.config.vlc_path_trimmed().is_empty() {
-            self.config.ensure_vlc_path();
-        }
         theme::set_mode(theme_mode);
         theme::apply(ctx);
         self.save_config(true);
         self.settings_draft = None;
+        self.settings_notice = None;
         self.show_settings = false;
 
         if base_changed {
@@ -1019,6 +1642,7 @@ impl App {
         self.browse = BrowseState::default();
         self.detail = None;
         self.play = None;
+        self.stop_player_silent();
         self.search_active = false;
         self.search.keyword.clear();
         self.category_filters = None;
@@ -1423,8 +2047,23 @@ impl eframe::App for App {
         self.frame_index = self.frame_index.wrapping_add(1);
         self.poster_requests_left = MAX_POSTER_REQUESTS_PER_FRAME as u8;
         self.poster_uploads_left = MAX_TEXTURE_UPLOADS_PER_FRAME as u8;
+        self.poll_player_events(ctx);
         self.process_events(ctx);
         self.draw_ui(ctx);
+        if self.player_view.is_some() || self.play.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // 只投递后台清理命令；mpv 由工作线程和 KILL_ON_JOB_CLOSE 作业对象兜底。
+        if let Some(mut player) = self.embedded.take() {
+            player.shutdown_fast();
+        }
+        if let Some(mut child) = self.external_vlc.take() {
+            let _ = child.kill();
+        }
+        self.video_window.destroy();
     }
 }
 

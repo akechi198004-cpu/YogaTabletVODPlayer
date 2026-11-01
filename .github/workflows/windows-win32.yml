@@ -14,6 +14,9 @@ env:
   BIN_NAME: hm-video-win32
   TARGET: i686-pc-windows-msvc
   PACKAGE_NAME: HMVideo-win32
+  # 内置播放器运行时：固定版本的 32 位 mpv 构建。
+  MPV_URL: https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261101/mpv-i686-20261101-git-48fca90e8c.7z
+  MPV_SHA256: dfd73fe3c71ccef2719322ca12d712e5efcfd889e8491f45f3c6791f202bf921
 
 jobs:
   build:
@@ -53,7 +56,27 @@ jobs:
           Copy-Item "assets/DroidSansFallbackFull.ttf" "$packageRoot/DroidSansFallbackFull.ttf"
           Copy-Item "assets/DroidSansFallbackFull.LICENSE.txt" "$packageRoot/DroidSansFallbackFull.LICENSE.txt"
           Copy-Item "packaging/windows/config.toml" "$packageRoot/config.toml"
+          Copy-Item "packaging/windows/MPV-NOTICE.txt" "$packageRoot/MPV-NOTICE.txt"
+          Copy-Item "packaging/windows/MPV-GPL-2.0.txt" "$packageRoot/MPV-GPL-2.0.txt"
           Copy-Item "README.md" "$packageRoot/README.md"
+
+          $mpvArchive = Join-Path $env:RUNNER_TEMP "mpv-i686.7z"
+          Invoke-WebRequest -Uri $env:MPV_URL -OutFile $mpvArchive
+          $actualHash = (Get-FileHash -Algorithm SHA256 $mpvArchive).Hash.ToLower()
+          if ($actualHash -ne $env:MPV_SHA256) {
+            throw "mpv archive checksum mismatch: $actualHash"
+          }
+          $mpvRoot = Join-Path $packageRoot "mpv"
+          New-Item -ItemType Directory -Force -Path $mpvRoot | Out-Null
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          if (!(Test-Path $sevenZip)) {
+            $sevenZip = "7z.exe"
+          }
+          & $sevenZip x $mpvArchive "-o$mpvRoot" "mpv.exe" "d3dcompiler_43.dll" -y
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path (Join-Path $mpvRoot "mpv.exe"))) {
+            throw "failed to extract mpv runtime"
+          }
+
           Compress-Archive -Path $packageRoot -DestinationPath "dist/${env:PACKAGE_NAME}.zip" -Force
 
       - name: Upload Win32 zip artifact

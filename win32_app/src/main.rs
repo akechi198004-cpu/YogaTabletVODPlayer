@@ -1,11 +1,13 @@
 //! HM影视 Windows 桌面版入口。
 //!
-//! 目标：老旧 Win32 32 位平板（内存约 2GB）上浏览星帆影视、搜索、选集，并用外部 VLC 播放。
+//! 目标：老旧 Win32 32 位平板（内存约 2GB）上浏览星帆影视、搜索、选集，
+//! 默认用随包 mpv 在应用窗口内播放，外部 VLC 作为兼容模式。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod cache;
 mod config;
+mod embedded;
 mod models;
 mod parser;
 mod player;

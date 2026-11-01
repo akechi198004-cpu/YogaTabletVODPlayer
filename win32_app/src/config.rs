@@ -33,13 +33,26 @@ pub enum ThemeMode {
     Day,
 }
 
+/// 播放后端。默认使用随包 mpv；外部 VLC 仅作兼容模式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayerBackend {
+    #[default]
+    Embedded,
+    ExternalVlc,
+}
+
 /// 可持久化的连接与播放设置。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default = "default_source_base")]
     pub source_base: String,
     #[serde(default)]
+    pub player_backend: PlayerBackend,
+    #[serde(default)]
     pub vlc_path: String,
+    #[serde(default = "default_embedded_volume")]
+    pub embedded_volume: u8,
     #[serde(default)]
     pub theme: ThemeMode,
 }
@@ -48,7 +61,9 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             source_base: default_source_base(),
+            player_backend: PlayerBackend::default(),
             vlc_path: String::new(),
+            embedded_volume: default_embedded_volume(),
             theme: ThemeMode::Night,
         }
     }
@@ -56,6 +71,10 @@ impl Default for AppConfig {
 
 fn default_source_base() -> String {
     DEFAULT_SOURCE_BASE.to_owned()
+}
+
+fn default_embedded_volume() -> u8 {
+    80
 }
 
 impl AppConfig {
@@ -69,6 +88,7 @@ impl AppConfig {
         if config.source_base.is_empty() {
             config.source_base = default_source_base();
         }
+        config.embedded_volume = config.embedded_volume.min(100);
         Ok(config)
     }
 
@@ -366,14 +386,32 @@ mod tests {
         let path = temp_path("roundtrip");
         let config = AppConfig {
             source_base: " https://www.xingfan.cc/ ".to_owned(),
+            player_backend: PlayerBackend::ExternalVlc,
             vlc_path: "C:\\VLC\\vlc.exe".to_owned(),
+            embedded_volume: 55,
             theme: ThemeMode::Day,
         };
         config.save(&path).expect("save");
         let loaded = AppConfig::load_or_default(&path).expect("load");
         assert_eq!(loaded.source_base, DEFAULT_SOURCE_BASE);
+        assert_eq!(loaded.player_backend, PlayerBackend::ExternalVlc);
         assert_eq!(loaded.vlc_path, "C:\\VLC\\vlc.exe");
+        assert_eq!(loaded.embedded_volume, 55);
         assert_eq!(loaded.theme, ThemeMode::Day);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_player_fields_default_to_embedded() {
+        let path = temp_path("old-player-fields");
+        fs::write(
+            &path,
+            "source_base = \"https://www.xingfan.cc\"\nvlc_path = \"\"\n",
+        )
+        .expect("write");
+        let loaded = AppConfig::load_or_default(&path).expect("load");
+        assert_eq!(loaded.player_backend, PlayerBackend::Embedded);
+        assert_eq!(loaded.embedded_volume, 80);
         let _ = fs::remove_file(path);
     }
 

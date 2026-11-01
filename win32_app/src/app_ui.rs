@@ -6,6 +6,8 @@ use eframe::egui::{
     self, Color32, Frame, Margin, RichText, Rounding, Sense, Stroke, TextureHandle, Vec2,
 };
 
+use crate::config::PlayerBackend;
+use crate::embedded;
 use crate::models::{
     ChipOption, Episode, FavoriteItem, FilterOptions, HomeData, MainTab, MineTab, SearchKind,
     WorkItem,
@@ -20,7 +22,9 @@ use crate::ui::poster_grid;
 use crate::ui::theme::colors;
 use crate::worker::BrowseData;
 
-use super::{App, ConfirmAction, SettingsDraft, TopPeriod, DAILY_PAGE_SIZE, GRID_PRELOAD_ROWS};
+use super::{
+    App, ConfirmAction, PlayerStatus, SettingsDraft, TopPeriod, DAILY_PAGE_SIZE, GRID_PRELOAD_ROWS,
+};
 
 const PAD: f32 = 14.0;
 const TOP_H: f32 = 56.0;
@@ -47,6 +51,10 @@ const HOT_KEYWORDS: &[&str] = &[
 
 impl App {
     pub(super) fn draw_ui(&mut self, ctx: &egui::Context) {
+        if self.player_view.is_some() {
+            self.draw_player_screen(ctx);
+            return;
+        }
         self.draw_status(ctx);
         if self.show_settings {
             self.draw_settings(ctx);
@@ -84,6 +92,366 @@ impl App {
         }
         if self.confirm.is_some() {
             self.draw_confirm(ctx);
+        }
+    }
+
+    fn draw_player_screen(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            if self.window_fullscreen {
+                self.exit_fullscreen(ctx);
+            } else {
+                self.close_player(ctx);
+            }
+            return;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Space)) {
+            self.toggle_player_pause();
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::F)) {
+            self.toggle_player_fullscreen(ctx);
+        }
+        let Some(view) = self.player_view.clone() else {
+            return;
+        };
+        let base_position = view.seek_target.unwrap_or(view.position);
+        if ctx.input(|input| input.key_pressed(egui::Key::ArrowLeft)) {
+            self.seek_player((base_position - 10.0).max(0.0));
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::ArrowRight)) {
+            let limit = view.duration.unwrap_or(base_position + 10.0);
+            self.seek_player((base_position + 10.0).min(limit));
+        }
+
+        let mut close = false;
+        let mut pause = false;
+        let mut fullscreen = false;
+        let mut line_switch = false;
+        let mut fallback = false;
+        let mut settings = false;
+        let mut replay = false;
+        let mut seek_request: Option<f64> = None;
+
+        if !self.window_fullscreen {
+            egui::TopBottomPanel::top("player_top")
+                .exact_height(TOP_H)
+                .frame(bar_frame(colors().top))
+                .show(ctx, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        if ui
+                            .add_sized(Vec2::new(112.0, 34.0), egui::Button::new("〈 返回选集"))
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                        ui.label(
+                            RichText::new(format!("{} · {}", view.work.title, view.episode_title))
+                                .size(16.0)
+                                .strong()
+                                .color(colors().text),
+                        );
+                        ui.label(
+                            RichText::new(&view.line_name)
+                                .size(11.0)
+                                .color(colors().accent),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_sized(Vec2::new(82.0, 34.0), egui::Button::new("全屏"))
+                                .clicked()
+                            {
+                                fullscreen = true;
+                            }
+                            ui.label(RichText::new("内置播放器").size(11.0).color(colors().muted));
+                        });
+                    });
+                    edge_line(ui, true);
+                });
+        }
+
+        let controls_height = 160.0;
+        egui::TopBottomPanel::bottom("player_controls")
+            .exact_height(controls_height)
+            .frame(bar_frame(colors().top))
+            .show(ctx, |ui| {
+                edge_line(ui, false);
+                ui.add_space(5.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 34.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let can_pause = matches!(
+                            view.status,
+                            PlayerStatus::Opening | PlayerStatus::Playing | PlayerStatus::Paused
+                        );
+                        if ui
+                            .add_enabled(
+                                can_pause,
+                                egui::Button::new(if view.status == PlayerStatus::Paused {
+                                    "继续"
+                                } else {
+                                    "暂停"
+                                })
+                                .min_size(Vec2::new(64.0, 30.0)),
+                            )
+                            .clicked()
+                        {
+                            pause = true;
+                        }
+                        if ui
+                            .add_sized(Vec2::new(72.0, 30.0), egui::Button::new("退出播放"))
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                        if view.info.lines.len() > 1
+                            && ui
+                                .add_sized(Vec2::new(82.0, 30.0), egui::Button::new("换线路"))
+                                .clicked()
+                        {
+                            line_switch = true;
+                        }
+                        if view.status == PlayerStatus::Ended
+                            && ui
+                                .add_sized(Vec2::new(82.0, 30.0), egui::Button::new("重新播放"))
+                                .clicked()
+                        {
+                            replay = true;
+                        }
+                        if view.status == PlayerStatus::Failed {
+                            if ui
+                                .add_sized(
+                                    Vec2::new(118.0, 30.0),
+                                    egui::Button::new("改用 VLC 播放"),
+                                )
+                                .clicked()
+                            {
+                                fallback = true;
+                            }
+                            if ui
+                                .add_sized(Vec2::new(72.0, 30.0), egui::Button::new("去设置"))
+                                .clicked()
+                            {
+                                settings = true;
+                            }
+                        }
+                        if ui
+                            .add_sized(
+                                Vec2::new(82.0, 30.0),
+                                egui::Button::new(if self.window_fullscreen {
+                                    "退出全屏"
+                                } else {
+                                    "全屏"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            fullscreen = true;
+                        }
+                        ui.label(RichText::new("音量").size(11.0).color(colors().muted));
+                        let mut volume = view.volume;
+                        let response = ui.add_sized(
+                            Vec2::new(100.0, 20.0),
+                            egui::Slider::new(&mut volume, 0..=100).show_value(true),
+                        );
+                        if response.changed() {
+                            self.set_player_volume(volume);
+                        }
+                        if response.drag_stopped() {
+                            self.save_config_silently();
+                        }
+                        let status = match view.status {
+                            PlayerStatus::Opening => "正在连接内置播放器…",
+                            PlayerStatus::Playing => "正在播放",
+                            PlayerStatus::Paused => "已暂停",
+                            PlayerStatus::Ended => "播放结束",
+                            PlayerStatus::Failed => "内置播放失败",
+                        };
+                        ui.label(RichText::new(status).size(11.0).color(
+                            if view.status == PlayerStatus::Failed {
+                                colors().danger
+                            } else {
+                                colors().muted
+                            },
+                        ));
+                    },
+                );
+                ui.add_space(3.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 22.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let duration = view.duration.unwrap_or(0.0);
+                        let position = view
+                            .seek_target
+                            .unwrap_or(view.position)
+                            .clamp(0.0, duration.max(0.0));
+                        ui.label(
+                            RichText::new(format_clock(position))
+                                .size(11.0)
+                                .color(colors().muted),
+                        );
+                        let bar_width = (ui.available_width() - 130.0).max(120.0);
+                        let (bar_rect, response) = ui.allocate_exact_size(
+                            Vec2::new(bar_width, 20.0),
+                            Sense::click_and_drag(),
+                        );
+                        let mut preview = view.seek_target.unwrap_or(position);
+                        if response.dragged() {
+                            if let Some(pointer) = response.interact_pointer_pos() {
+                                let track_left = bar_rect.left() + 6.0;
+                                let track_width = (bar_rect.width() - 12.0).max(1.0);
+                                let fraction =
+                                    ((pointer.x - track_left) / track_width).clamp(0.0, 1.0) as f64;
+                                preview = fraction * duration;
+                                if let Some(view) = self.player_view.as_mut() {
+                                    view.seek_target = Some(preview);
+                                }
+                            }
+                        }
+                        let fraction = if duration > 0.0 {
+                            (preview / duration).clamp(0.0, 1.0) as f32
+                        } else {
+                            0.0
+                        };
+                        let track_left = bar_rect.left() + 6.0;
+                        let track_right = bar_rect.right() - 6.0;
+                        let center_y = bar_rect.center().y;
+                        let track = egui::Rect::from_min_max(
+                            egui::pos2(track_left, center_y - 1.5),
+                            egui::pos2(track_right, center_y + 1.5),
+                        );
+                        let painter = ui.painter();
+                        painter.rect_filled(track, 2.0, colors().card_line);
+                        let handle_x = track_left + (track_right - track_left) * fraction;
+                        let filled =
+                            egui::Rect::from_min_max(track.min, egui::pos2(handle_x, track.max.y));
+                        painter.rect_filled(filled, 2.0, colors().accent);
+                        painter.circle_filled(
+                            egui::pos2(handle_x, center_y),
+                            if response.hovered() { 7.5 } else { 6.5 },
+                            colors().text,
+                        );
+                        if duration > 0.0 && (response.clicked() || response.drag_stopped()) {
+                            let target = if let Some(pointer) = response.interact_pointer_pos() {
+                                let fraction = ((pointer.x - track_left)
+                                    / (track_right - track_left).max(1.0))
+                                .clamp(0.0, 1.0)
+                                    as f64;
+                                fraction * duration
+                            } else {
+                                preview
+                            };
+                            seek_request = Some(target);
+                        }
+                        if response.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        ui.label(
+                            RichText::new(format_clock(duration))
+                                .size(11.0)
+                                .color(colors().muted),
+                        );
+                    },
+                );
+            });
+
+        egui::CentralPanel::default()
+            .frame(Frame::none().fill(Color32::BLACK))
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+                self.update_player_bounds(Some(rect), ctx);
+                let painter = ui.painter();
+                painter.rect_filled(rect, Rounding::same(0.0), Color32::BLACK);
+                if let Some(error) = &view.error {
+                    ui.allocate_ui_at_rect(rect, |ui| {
+                        ui.add_space((rect.height() * 0.18).max(20.0));
+                        ui.vertical_centered(|ui| {
+                            ui.set_max_width((rect.width() * 0.78).max(240.0));
+                            ui.label(
+                                RichText::new("内置播放失败")
+                                    .size(22.0)
+                                    .strong()
+                                    .color(colors().danger),
+                            );
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(error).size(13.0).color(colors().text));
+                            ui.add_space(16.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                if ui
+                                    .add_sized(
+                                        Vec2::new(132.0, 36.0),
+                                        egui::Button::new("改用 VLC 播放"),
+                                    )
+                                    .clicked()
+                                {
+                                    fallback = true;
+                                }
+                                if ui
+                                    .add_sized(Vec2::new(100.0, 36.0), egui::Button::new("去设置"))
+                                    .clicked()
+                                {
+                                    settings = true;
+                                }
+                                if ui
+                                    .add_sized(
+                                        Vec2::new(100.0, 36.0),
+                                        egui::Button::new("返回选集"),
+                                    )
+                                    .clicked()
+                                {
+                                    close = true;
+                                }
+                            });
+                        });
+                    });
+                } else if view.status == PlayerStatus::Ended {
+                    ui.allocate_ui_at_rect(rect, |ui| {
+                        ui.add_space((rect.height() * 0.3).max(24.0));
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                RichText::new("播放结束")
+                                    .size(22.0)
+                                    .strong()
+                                    .color(colors().text),
+                            );
+                            ui.add_space(10.0);
+                            if ui
+                                .add_sized(Vec2::new(110.0, 36.0), egui::Button::new("重新播放"))
+                                .clicked()
+                            {
+                                replay = true;
+                            }
+                            if ui
+                                .add_sized(Vec2::new(110.0, 36.0), egui::Button::new("返回选集"))
+                                .clicked()
+                            {
+                                close = true;
+                            }
+                        });
+                    });
+                }
+            });
+
+        if close {
+            self.close_player(ctx);
+        } else if fallback {
+            self.fallback_player_to_vlc(ctx);
+        } else if settings {
+            self.close_player(ctx);
+            self.open_settings();
+        } else if line_switch {
+            self.restart_player_line();
+        } else if replay {
+            self.replay_player();
+        } else if pause {
+            self.toggle_player_pause();
+        } else if fullscreen {
+            self.toggle_player_fullscreen(ctx);
+        } else if let Some(seconds) = seek_request {
+            self.seek_player(seconds);
         }
     }
 
@@ -243,7 +611,7 @@ impl App {
                     ui.label(RichText::new(label).size(11.0).color(colors().muted));
                     ui.separator();
                     ui.label(
-                        RichText::new("HM 影视 · 外部 VLC 播放")
+                        RichText::new("HM 影视 · 内置播放器 / 外部 VLC")
                             .size(11.0)
                             .color(colors().muted),
                     );
@@ -947,7 +1315,7 @@ impl App {
                     MineTab::Favorites => {
                         "您还没有收藏任何影视作品。\n在详情页点「收藏」即可在这里查看。"
                     }
-                    MineTab::History => "暂无观看记录。\n用 VLC 播放后会自动记录最后观看的剧集。",
+                    MineTab::History => "暂无观看记录。\n开始播放后会自动记录最后观看的剧集。",
                 },
             );
             return;
@@ -1613,7 +1981,7 @@ impl App {
                             }
                             ui.label(
                                 RichText::new(
-                                    "外部 VLC 播放，不内嵌播放器；低配平板只负责浏览与解析。",
+                                    "默认使用随包 mpv 在应用窗口内播放；外部 VLC 仅作兼容模式。",
                                 )
                                 .color(colors().muted),
                             );
@@ -1632,34 +2000,152 @@ impl App {
                                         false,
                                         "默认 https://www.xingfan.cc；一般不需要修改。",
                                     );
+                                    ui.label(
+                                        RichText::new("播放方式")
+                                            .size(13.0)
+                                            .strong()
+                                            .color(colors().text),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.radio_value(
+                                        &mut draft.player_backend,
+                                        PlayerBackend::Embedded,
+                                        "内置播放器（推荐，默认）",
+                                    );
+                                    ui.radio_value(
+                                        &mut draft.player_backend,
+                                        PlayerBackend::ExternalVlc,
+                                        "外部 VLC（兼容模式）",
+                                    );
+                                    if draft.player_backend == PlayerBackend::Embedded
+                                        && !embedded::available()
+                                    {
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "当前发布包缺少 mpv/mpv.exe，内置播放不可用；可改用外部 VLC。",
+                                            )
+                                            .size(11.0)
+                                            .color(colors().danger),
+                                        );
+                                    }
+                                    ui.add_space(10.0);
                                     labeled_field(
                                         ui,
                                         "VLC 可执行文件路径",
                                         &mut draft.vlc_path,
                                         false,
-                                        r"例如 C:\Program Files\VideoLAN\VLC\vlc.exe；留空会尝试自动检测。",
+                                        r"仅外部 VLC 模式使用；例如 C:\Program Files\VideoLAN\VLC\vlc.exe。",
                                     );
-                                    if ui
-                                        .add_sized(
-                                            Vec2::new(132.0, 34.0),
-                                            egui::Button::new("自动检测 VLC"),
-                                        )
-                                        .clicked()
-                                    {
-                                        if let Some(path) = player::find_vlc() {
-                                            draft.vlc_path =
-                                                path.to_string_lossy().into_owned();
-                                            draft.detected_vlc = Some(draft.vlc_path.clone());
-                                        } else {
-                                            draft.detected_vlc = None;
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                        if ui
+                                            .add_sized(
+                                                Vec2::new(96.0, 34.0),
+                                                egui::Button::new("选择文件"),
+                                            )
+                                            .clicked()
+                                        {
+                                            match rfd::FileDialog::new()
+                                                .set_title("选择 vlc.exe")
+                                                .add_filter("VLC", &["exe"])
+                                                .pick_file()
+                                            {
+                                                Some(path) => {
+                                                    match player::validate_vlc_path(
+                                                        &path.to_string_lossy(),
+                                                    ) {
+                                                        Ok(path) => {
+                                                            draft.vlc_path = path
+                                                                .to_string_lossy()
+                                                                .into_owned();
+                                                            self.settings_notice = Some((
+                                                                format!(
+                                                                    "已选择 VLC：{}",
+                                                                    draft.vlc_path
+                                                                ),
+                                                                false,
+                                                            ));
+                                                        }
+                                                        Err(error) => {
+                                                            self.settings_notice = Some((
+                                                                format!(
+                                                                    "所选文件无效：{error}。原路径保持不变。"
+                                                                ),
+                                                                true,
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                                None => self.settings_notice = None,
+                                            }
                                         }
-                                    }
-                                    if let Some(path) = &draft.detected_vlc {
+                                        if ui
+                                            .add_sized(
+                                                Vec2::new(132.0, 34.0),
+                                                egui::Button::new("选择安装目录"),
+                                            )
+                                            .clicked()
+                                        {
+                                            match rfd::FileDialog::new()
+                                                .set_title("选择 VLC 安装目录")
+                                                .pick_folder()
+                                            {
+                                                Some(directory) => {
+                                                    match player::find_vlc_in_dir(&directory) {
+                                                        Some(path) => {
+                                                            let text =
+                                                                path.to_string_lossy().into_owned();
+                                                            draft.vlc_path = text.clone();
+                                                            self.settings_notice = Some((
+                                                                format!("已选择 VLC：{text}"),
+                                                                false,
+                                                            ));
+                                                        }
+                                                        None => {
+                                                            self.settings_notice = Some((
+                                                                format!(
+                                                                    "所选目录中未找到 vlc.exe：{}。原路径保持不变。",
+                                                                    directory.display()
+                                                                ),
+                                                                true,
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                                None => self.settings_notice = None,
+                                            }
+                                        }
+                                        if ui
+                                            .add_sized(
+                                                Vec2::new(132.0, 34.0),
+                                                egui::Button::new("自动检测 VLC"),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(path) = player::find_vlc() {
+                                                draft.vlc_path =
+                                                    path.to_string_lossy().into_owned();
+                                                self.settings_notice = Some((
+                                                    format!("已检测到：{}", draft.vlc_path),
+                                                    false,
+                                                ));
+                                            } else {
+                                                self.settings_notice = Some((
+                                                    "未检测到 VLC。内置播放不受影响。".to_owned(),
+                                                    true,
+                                                ));
+                                            }
+                                        }
+                                    });
+                                    if let Some((message, error)) = &self.settings_notice {
                                         ui.add_space(6.0);
                                         ui.label(
-                                            RichText::new(format!("已检测到：{path}"))
-                                                .size(11.0)
-                                                .color(colors().online),
+                                            RichText::new(message).size(11.0).color(if *error {
+                                                colors().danger
+                                            } else {
+                                                colors().online
+                                            }),
                                         );
                                     }
                                     ui.add_space(16.0);
@@ -1710,6 +2196,7 @@ impl App {
         }
         if back {
             self.settings_draft = None;
+            self.settings_notice = None;
             self.show_settings = false;
         } else if save {
             self.apply_settings(draft, ctx);
@@ -1922,7 +2409,7 @@ impl App {
             if let Some(info) = &dialog.info {
                 ui.label(
                     RichText::new(format!(
-                        "共 {} 条线路。外部 VLC 打开后，本程序不跟踪播放进度。",
+                        "共 {} 条线路。选择线路后按当前播放方式打开；内置失败可手动改用 VLC。",
                         info.lines.len()
                     ))
                     .size(11.0)
@@ -2246,6 +2733,21 @@ fn section_header(
         }
     });
     ui.add_space(2.0);
+}
+
+fn format_clock(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return "00:00".to_owned();
+    }
+    let total = seconds.floor() as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let secs = total % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes:02}:{secs:02}")
+    }
 }
 
 fn pager_reserved_height(total_pages: u32) -> f32 {

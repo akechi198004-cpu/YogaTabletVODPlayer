@@ -1,5 +1,7 @@
 # HM影视 Windows 32 位发布包默认配置。
-# vlc_path 留空：首次启动自动检测 VLC；也可以在设置页手动填写。
+# 默认使用随包 mpv 内置播放；外部 VLC 仅作兼容模式。
 source_base = "https://www.xingfan.cc"
+player_backend = "embedded"
 vlc_path = ""
+embedded_volume = 80
 theme = "night"

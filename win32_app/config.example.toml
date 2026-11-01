@@ -1,10 +1,16 @@
 # 星帆影视站点地址。一般不需要修改。
 source_base = "https://www.xingfan.cc"
 
-# VLC 可执行文件路径。留空时程序会在常见安装位置和 PATH 中自动查找。
+# 播放后端：embedded = 随包内置 mpv；external_vlc = 外部 VLC 兼容模式。
+player_backend = "embedded"
+
+# 仅外部 VLC 模式使用。留空时播放前会尝试自动检测。
 # Windows 示例：vlc_path = "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
 # 32 位 VLC 也可能安装在 C:\Program Files (x86)\VideoLAN\VLC\vlc.exe
 vlc_path = ""
+
+# 内置播放器音量，0-100。
+embedded_volume = 80
 
 # night = 夜间深蓝灰；day = 白天浅灰蓝
 theme = "night"

@@ -2,7 +2,7 @@
 name = "hm-video-win32"
 version = "0.1.0"
 edition = "2021"
-description = "HM影视 Windows 桌面版：星帆影视浏览、搜索与外部 VLC 播放"
+description = "HM影视 Windows 桌面版：星帆影视浏览、搜索与内置 mpv 播放"
 
 [dependencies]
 directories = "5.0"
@@ -11,12 +11,27 @@ egui = "0.27"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 regex = "1.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "rustls-tls"] }
+rfd = "0.15"
+raw-window-handle = "0.6"
 scraper = "0.20"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 toml = "0.8"
 url = "2.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 opt-level = "s"
