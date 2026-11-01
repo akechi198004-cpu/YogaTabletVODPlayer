@@ -5,14 +5,9 @@ on:
     branches:
       - main
       - master
-    paths:
-      - "win32_app/**"
-      - ".github/workflows/windows-win32.yml"
-  pull_request:
-    paths:
-      - "win32_app/**"
-      - ".github/workflows/windows-win32.yml"
-  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,6 +17,7 @@ env:
 
 jobs:
   build:
+    if: contains(github.event.head_commit.message, '[deploy]')
     runs-on: windows-latest
     defaults:
       run:
@@ -29,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -42,11 +38,11 @@ jobs:
           workspaces: win32_app -> target
           key: ${{ env.TARGET }}
 
-      - name: Run tests (host target)
-        run: cargo test
+      - name: Test Win32 target
+        run: cargo test --locked --target $env:TARGET
 
       - name: Build 32-bit release binary
-        run: cargo build --release --target $env:TARGET
+        run: cargo build --locked --release --target $env:TARGET
 
       - name: Prepare zip package
         shell: pwsh
@@ -61,7 +57,8 @@ jobs:
           Compress-Archive -Path $packageRoot -DestinationPath "dist/${env:PACKAGE_NAME}.zip" -Force
 
       - name: Upload Win32 zip artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.PACKAGE_NAME }}
           path: win32_app/dist/${{ env.PACKAGE_NAME }}.zip
+          if-no-files-found: error

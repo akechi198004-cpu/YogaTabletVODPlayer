@@ -79,10 +79,13 @@ cd win32_app
 
 ### GitHub Actions
 
-仓库根目录 `.github/workflows/windows-win32.yml` 会在 `windows-latest` 上：
+仓库根目录 `.github/workflows/windows-win32.yml` 在推送到 `main` / `master` 后，
+仅当最新提交消息包含 `[deploy]` 时，才会在 `windows-latest` 上执行构建。
+例如：`git commit -m "[deploy] build Win32 package"`。
+普通提交会跳过构建任务；PR 和手动运行不触发该工作流。
 
-- 运行主机测试
-- 构建 `i686-pc-windows-msvc`
+- 使用锁定依赖运行 `i686-pc-windows-msvc` 目标测试
+- 使用锁定依赖构建 `i686-pc-windows-msvc` 发布版
 - 上传 `HMVideo-win32.zip` 构件
 
 本地没有 MSVC 交叉工具链时，建议用该工作流产出 Win32 包。
