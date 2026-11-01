@@ -334,7 +334,13 @@ impl App {
             .inner_margin(Margin::same(12.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    poster_image(ui, self.texture_for(&slide.poster), 96.0, 144.0);
+                    poster_image(
+                        ui,
+                        self.texture_for(&slide.poster),
+                        self.texture_size(&slide.poster),
+                        96.0,
+                        144.0,
+                    );
                     ui.add_space(12.0);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 5.0;
@@ -964,7 +970,13 @@ impl App {
                                 if !row.work.poster.is_empty() {
                                     visible_posters.insert(row.work.poster.clone());
                                 }
-                                poster_image(ui, self.texture_for(&row.work.poster), 64.0, 96.0);
+                                poster_image(
+                                    ui,
+                                    self.texture_for(&row.work.poster),
+                                    self.texture_size(&row.work.poster),
+                                    64.0,
+                                    96.0,
+                                );
                                 ui.add_space(12.0);
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 4.0;
@@ -1214,6 +1226,7 @@ impl App {
                         poster_image(
                             ui,
                             self.texture_for(&poster_url),
+                            self.texture_size(&poster_url),
                             DETAIL_POSTER_W,
                             DETAIL_POSTER_H,
                         );
@@ -2271,15 +2284,19 @@ fn brand_titles(ui: &mut egui::Ui) {
 fn poster_image(
     ui: &mut egui::Ui,
     texture: Option<&TextureHandle>,
+    size: Option<[usize; 2]>,
     width: f32,
     height: f32,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     if let Some(texture) = texture {
-        egui::Image::from_texture(texture)
+        let mut image = egui::Image::from_texture(texture)
             .rounding(8.0)
-            .bg_fill(colors().poster)
-            .paint_at(ui, rect);
+            .bg_fill(colors().poster);
+        if let Some(uv) = cover_uv(size, width, height) {
+            image = image.uv(uv);
+        }
+        image.paint_at(ui, rect);
     } else {
         ui.painter()
             .rect_filled(rect, Rounding::same(8.0), colors().poster);
@@ -2292,6 +2309,27 @@ fn poster_image(
         );
     }
     response
+}
+
+/// 计算中心裁切的 UV，让宽幅精选图填满 2:3 卡片而不拉伸。
+fn cover_uv(size: Option<[usize; 2]>, target_width: f32, target_height: f32) -> Option<egui::Rect> {
+    let [image_width, image_height] = size?;
+    if image_width == 0 || image_height == 0 || target_width <= 0.0 || target_height <= 0.0 {
+        return None;
+    }
+    let image_aspect = image_width as f32 / image_height as f32;
+    let target_aspect = target_width / target_height;
+    let (u0, v0, u1, v1) = if image_aspect > target_aspect {
+        let visible = target_aspect / image_aspect;
+        ((1.0 - visible) / 2.0, 0.0, (1.0 + visible) / 2.0, 1.0)
+    } else {
+        let visible = image_aspect / target_aspect;
+        (0.0, (1.0 - visible) / 2.0, 1.0, (1.0 + visible) / 2.0)
+    };
+    Some(egui::Rect::from_min_max(
+        egui::pos2(u0, v0),
+        egui::pos2(u1, v1),
+    ))
 }
 
 fn draw_loading(ui: &mut egui::Ui, text: &str) {
@@ -2472,4 +2510,27 @@ fn labeled_field(ui: &mut egui::Ui, label: &str, value: &mut String, password: b
     ui.add_space(5.0);
     ui.label(RichText::new(hint).size(10.5).color(colors().muted));
     ui.add_space(12.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_uv_center_crops_wide_backdrop() {
+        let uv = cover_uv(Some([1600, 900]), 96.0, 144.0).expect("uv");
+        assert!(uv.min.x > 0.0);
+        assert!(uv.max.x < 1.0);
+        assert_eq!(uv.min.y, 0.0);
+        assert_eq!(uv.max.y, 1.0);
+    }
+
+    #[test]
+    fn cover_uv_keeps_matching_poster_full() {
+        let uv = cover_uv(Some([180, 270]), 96.0, 144.0).expect("uv");
+        assert!((uv.min.x - 0.0).abs() < 0.001);
+        assert!((uv.min.y - 0.0).abs() < 0.001);
+        assert!((uv.max.x - 1.0).abs() < 0.001);
+        assert!((uv.max.y - 1.0).abs() < 0.001);
+    }
 }

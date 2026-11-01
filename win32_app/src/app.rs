@@ -87,6 +87,7 @@ struct PosterTexture {
     handle: TextureHandle,
     last_used_frame: u64,
     bytes: usize,
+    size: [usize; 2],
 }
 
 struct DeferredPoster {
@@ -1214,15 +1215,15 @@ impl App {
         }
         let image = ColorImage::from_rgba_unmultiplied(poster.size, &poster.pixels);
         let handle = ctx.load_texture(key.clone(), image, TextureOptions::LINEAR);
-        let bytes = poster.size[0]
-            .saturating_mul(poster.size[1])
-            .saturating_mul(4);
+        let size = poster.size;
+        let bytes = size[0].saturating_mul(size[1]).saturating_mul(4);
         self.textures.insert(
             key.clone(),
             PosterTexture {
                 handle,
                 last_used_frame: self.frame_index,
                 bytes,
+                size,
             },
         );
         self.poster_failures.remove(&key);
@@ -1230,6 +1231,10 @@ impl App {
 
     fn texture_for(&self, poster_url: &str) -> Option<&TextureHandle> {
         self.textures.get(poster_url).map(|texture| &texture.handle)
+    }
+
+    fn texture_size(&self, poster_url: &str) -> Option<[usize; 2]> {
+        self.textures.get(poster_url).map(|texture| texture.size)
     }
 
     fn touch_texture(&mut self, key: &str) {
