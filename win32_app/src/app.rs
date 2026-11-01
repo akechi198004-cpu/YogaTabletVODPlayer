@@ -790,10 +790,10 @@ impl App {
                     episode_url,
                     played_at: now_unix(),
                 };
+                self.error_text = None;
                 self.user_data.record_history(history);
                 self.save_user_data();
                 self.close_play();
-                self.error_text = None;
                 self.status_text = format!("已用 VLC 打开《{} · {}》", work.title, episode_title);
             }
             Err(error) => {
@@ -820,8 +820,8 @@ impl App {
         };
         let title = item.title.clone();
         let added = self.user_data.toggle_favorite(item);
-        self.save_user_data();
         self.error_text = None;
+        self.save_user_data();
         self.status_text = if added {
             format!("已收藏《{title}》")
         } else {
