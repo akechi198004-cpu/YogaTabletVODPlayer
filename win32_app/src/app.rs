@@ -916,7 +916,16 @@ impl App {
         let backup = self
             .user_file
             .with_file_name(format!("user_data.json.bak-{}", now_unix()));
-        if self.user_file.exists() {
+        let exists = match crate::config::path_exists_checked(&self.user_file) {
+            Ok(exists) => exists,
+            Err(error) => {
+                self.set_error(format!(
+                    "无法确认用户数据文件状态，未做任何覆盖；请检查文件权限后重试：{error}"
+                ));
+                return;
+            }
+        };
+        if exists {
             if let Err(error) = fs::rename(&self.user_file, &backup) {
                 self.set_error(format!("备份原用户数据失败，未做任何覆盖：{error}"));
                 return;

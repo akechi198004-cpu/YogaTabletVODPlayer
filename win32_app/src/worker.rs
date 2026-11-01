@@ -916,6 +916,46 @@ mod tests {
     }
 
     #[test]
+    fn hidden_zero_total_does_not_replace_cache() {
+        let (root, cache) = temp_cache("hidden-zero");
+        cache
+            .store(
+                &cache_key(SOURCE, "list:/demo/"),
+                &page("cached", Some(1)),
+                None,
+                None,
+            )
+            .expect("store");
+        let policy = CachePolicy {
+            fresh_secs: 0,
+            max_stale_secs: 3600,
+        };
+        let parse_error: FetchError = crate::parser::parse_category_page(
+            "<html><body><main><template><span>共 0 部</span></template><aside><span>共 0 部</span></aside><div data-infinite-root></div></main></body></html>",
+            1,
+        )
+        .expect_err("hidden zero is not explicit empty")
+        .into();
+        let result = load_cached(
+            &cache,
+            SOURCE,
+            "list:/demo/",
+            policy,
+            false,
+            |data: &PageResult| !data.items.is_empty() || data.total_items == Some(0),
+            move |_, _| Err(parse_error),
+        )
+        .expect("fallback");
+        assert_eq!(result.0.items[0].title, "cached");
+        assert!(result.1);
+        let cached = cache
+            .load::<PageResult>(&cache_key(SOURCE, "list:/demo/"))
+            .expect("cache still present");
+        assert_eq!(cached.data.items[0].title, "cached");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn parse_failure_without_cache_is_retryable_error() {
         let (root, cache) = temp_cache("no-cache");
         let policy = CachePolicy {

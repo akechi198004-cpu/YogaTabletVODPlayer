@@ -3,7 +3,7 @@
 //! 配置使用 TOML，收藏/历史/搜索记录使用独立 JSON，避免用户手改配置时误删记录。
 
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -132,10 +132,13 @@ impl UserData {
     /// 读取用户数据。`Ok(None)` 表示文件尚不存在（首次运行），
     /// `Err` 表示文件存在但读取/解析失败；调用方应保护原文件。
     pub fn load_optional(path: &Path) -> Result<Option<Self>, UserDataError> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(path)?;
+        // 直接读取：只有明确的 NotFound 才视为首次运行。
+        // 权限、目录、设备错误等必须进入保护状态，不能用空数据覆盖。
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(UserDataError::Io(error)),
+        };
         let mut data = serde_json::from_str::<Self>(content.trim_start_matches('\u{feff}'))?;
         data.normalize();
         Ok(Some(data))
@@ -243,6 +246,16 @@ impl UserData {
 
     pub fn clear_history(&mut self) {
         self.history.clear();
+    }
+}
+
+/// 检查用户数据路径是否存在。只有 NotFound 视为不存在，
+/// 权限/元数据错误必须返回 Err，避免恢复流程误判后解除保护。
+pub fn path_exists_checked(path: &Path) -> Result<bool, UserDataError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(UserDataError::Io(error)),
     }
 }
 
@@ -432,6 +445,65 @@ mod tests {
         assert!(UserData::load_optional(&corrupt).is_err());
         assert_eq!(fs::read(&corrupt).expect("original"), b"{not-json");
         let _ = fs::remove_file(corrupt);
+    }
+
+    #[test]
+    fn directory_is_not_treated_as_missing_user_data() {
+        let path = temp_path("user-dir");
+        fs::create_dir(&path).expect("create dir");
+        let error = UserData::load_optional(&path).expect_err("directory must be an error");
+        match error {
+            UserDataError::Io(error) => assert_ne!(error.kind(), ErrorKind::NotFound),
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let written = UserData::default()
+            .save_if_allowed(&path, false)
+            .expect("guarded save");
+        assert!(!written);
+        assert!(path.is_dir(), "I/O error must not remove or overwrite path");
+        fs::remove_dir(&path).expect("remove dir");
+    }
+
+    #[test]
+    fn invalid_path_is_not_treated_as_first_run() {
+        let path = PathBuf::from("invalid\0path");
+        assert!(path_exists_checked(&path).is_err());
+        assert!(UserData::load_optional(&path).is_err());
+    }
+
+    #[test]
+    fn path_state_only_treats_not_found_as_missing() {
+        let missing = temp_path("state-missing");
+        assert!(!path_exists_checked(&missing).expect("missing state"));
+
+        let existing = temp_path("state-existing");
+        fs::write(&existing, b"{}").expect("write");
+        assert!(path_exists_checked(&existing).expect("existing state"));
+        let _ = fs::remove_file(existing);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_parent_is_not_reported_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_path("user-perm-dir");
+        fs::create_dir(&dir).expect("create dir");
+        let file = dir.join("user_data.json");
+        fs::write(&file, b"{}").expect("write user data");
+        let original = fs::metadata(&dir).expect("metadata").permissions();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let state = path_exists_checked(&file);
+        let _load = UserData::load_optional(&file);
+
+        fs::set_permissions(&dir, original).expect("restore chmod");
+        assert!(
+            !matches!(state, Ok(false)),
+            "permission/metadata error must not be treated as missing"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

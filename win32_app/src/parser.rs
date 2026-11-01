@@ -690,6 +690,17 @@ pub fn parse_detail_page(html: &str, detail_url: &str) -> Result<WorkDetail, Par
     if title.trim().is_empty() {
         return Err(ParseError("详情页结构无法识别：未找到作品标题"));
     }
+    // h1 可能来自维护/验证页。作品页至少要有线路、分类、简介或集数之一；
+    // 合法的“暂无剧集”详情仍可依靠分类/简介通过。
+    let has_detail_structure = !lines.is_empty()
+        || category.is_some()
+        || description.is_some()
+        || total_episodes.unwrap_or(0) > 0;
+    if !has_detail_structure {
+        return Err(ParseError(
+            "详情页结构无法识别：未找到线路、分类、简介或集数",
+        ));
+    }
     Ok(WorkDetail {
         title: title.trim().to_owned(),
         url: detail_url.to_owned(),
@@ -975,15 +986,102 @@ fn parse_pagination(document: &Html) -> (u32, u32) {
 }
 
 fn parse_total_items(document: &Html) -> Option<u32> {
-    let body = document.root_element();
-    let text: String = body.text().collect::<Vec<_>>().join(" ");
+    let root = document.root_element();
+    let main = root.select(&sel("main")).next().unwrap_or(root);
     static TOTAL_RE: OnceLock<Regex> = OnceLock::new();
     let regex =
         TOTAL_RE.get_or_init(|| Regex::new(r"共\s*(\d+)\s*[条个部]").expect("total items regex"));
-    regex
-        .captures(&text)
-        .and_then(|captures| captures.get(1))
-        .and_then(|value| value.as_str().parse::<u32>().ok())
+    let candidate_sel = sel("span, div, p, li, strong, b, small, em");
+
+    // 只接受结果区域中“自身直接文字”里的计数，避免把导航、侧栏、
+    // 推荐区或隐藏模板中的“共 0 部”当成当前结果。
+    for node in main.select(&candidate_sel) {
+        if !is_visible_result_node(&node) || is_unrelated_result_region(&node) {
+            continue;
+        }
+        let text = direct_text_of(&node);
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(captures) = regex.captures(&text) {
+            if let Some(value) = captures
+                .get(1)
+                .and_then(|value| value.as_str().parse::<u32>().ok())
+            {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// 元素自身直接包含的文字；父容器拼接文字不参与总数识别。
+fn direct_text_of(element: &ElementRef<'_>) -> String {
+    let raw: String = element
+        .children()
+        .filter_map(|child| child.value().as_text())
+        .map(|text| &**text)
+        .collect::<Vec<_>>()
+        .join("");
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 结果区域之外的导航、侧栏、页脚、推荐、评论等不参与总数识别。
+fn is_unrelated_result_region(element: &ElementRef<'_>) -> bool {
+    let mut current = Some(*element);
+    while let Some(node) = current {
+        let tag = node.value().name();
+        if matches!(
+            tag,
+            "nav" | "aside" | "footer" | "header" | "form" | "dialog"
+        ) {
+            return true;
+        }
+        let role = node.value().attr("role").unwrap_or("").to_ascii_lowercase();
+        if matches!(
+            role.as_str(),
+            "navigation" | "complementary" | "contentinfo" | "banner"
+        ) {
+            return true;
+        }
+        let class_or_id = [
+            node.value().attr("class").unwrap_or(""),
+            node.value().attr("id").unwrap_or(""),
+        ];
+        if class_or_id.iter().any(|value| {
+            value
+                .to_ascii_lowercase()
+                .split(|ch: char| ch.is_whitespace() || ch == '-' || ch == '_')
+                .any(|token| {
+                    matches!(
+                        token,
+                        "nav"
+                            | "navbar"
+                            | "sidebar"
+                            | "footer"
+                            | "breadcrumb"
+                            | "related"
+                            | "recommend"
+                            | "recommendations"
+                            | "comment"
+                            | "comments"
+                            | "copyright"
+                            | "share"
+                            | "advert"
+                            | "ads"
+                            | "ad"
+                            | "promo"
+                            | "promotion"
+                            | "login"
+                            | "modal"
+                    )
+                })
+        }) {
+            return true;
+        }
+        current = node.parent().and_then(ElementRef::wrap);
+    }
+    false
 }
 
 fn has_confirmed_empty_state(document: &Html) -> bool {
@@ -991,13 +1089,16 @@ fn has_confirmed_empty_state(document: &Html) -> bool {
     let main = root.select(&sel("main")).next().unwrap_or(root);
     if main
         .select(&sel("img.empty-img, .empty-img"))
-        .any(|node| is_visible_result_node(&node))
+        .any(|node| is_visible_result_node(&node) && !is_unrelated_result_region(&node))
     {
         return true;
     }
     for node in main.select(&sel("p, div, span")) {
         let text = text_of(&node);
-        if EMPTY_STATE_TEXTS.iter().any(|value| *value == text) && is_visible_result_node(&node) {
+        if EMPTY_STATE_TEXTS.iter().any(|value| *value == text)
+            && is_visible_result_node(&node)
+            && !is_unrelated_result_region(&node)
+        {
             return true;
         }
     }
@@ -1007,8 +1108,12 @@ fn has_confirmed_empty_state(document: &Html) -> bool {
 /// 排除模板、脚本、隐藏的旧空态 DOM，避免把异常空页写进缓存。
 fn is_visible_result_node(element: &ElementRef<'_>) -> bool {
     let mut current = Some(*element);
+    let mut attached_to_document = false;
     while let Some(node) = current {
         let tag = node.value().name();
+        if tag == "html" {
+            attached_to_document = true;
+        }
         if matches!(tag, "template" | "script" | "style" | "noscript") {
             return false;
         }
@@ -1038,7 +1143,8 @@ fn is_visible_result_node(element: &ElementRef<'_>) -> bool {
         }
         current = node.parent().and_then(ElementRef::wrap);
     }
-    true
+    // 模板内容在 scraper 中可能是脱离文档树的节点，不能算可见。
+    attached_to_document
 }
 
 fn parse_filter_options(document: &Html) -> FilterOptions {
@@ -1416,6 +1522,61 @@ mod tests {
     </main></body></html>
     "#;
 
+    const HIDDEN_ZERO_TOTAL_LIST_HTML: &str = r#"
+    <html><body><main>
+      <template><span>共 0 部</span></template>
+      <div style="display:none"><span>共 0 部</span><p>没有找到相关内容</p></div>
+      <div hidden><span>共 0 部</span></div>
+      <aside><span>共 0 部</span><p>没有找到相关内容</p></aside>
+      <div class="recommendations"><span>共 0 部</span></div>
+      <div data-infinite-root></div>
+    </main></body></html>
+    "#;
+
+    const VISIBLE_TOTAL_WITH_HIDDEN_ZERO_HTML: &str = r#"
+    <html><body><main>
+      <template><span>共 0 部</span></template>
+      <aside><span>共 0 部</span></aside>
+      <div data-infinite-root>
+        <a href="/guocanju/demo/" class="proto-rim group">
+          <img src="https://cdn.example/a.jpg" alt="示例">
+          <div class="p-2.5"><p>示例</p><span>2026</span></div>
+        </a>
+      </div>
+      <span>共 42 部</span>
+    </main></body></html>
+    "#;
+
+    const MAINTENANCE_DETAIL_HTML: &str = r#"
+    <html><head>
+      <meta property="og:image" content="https://cdn.example/logo.png">
+    </head><body><main>
+      <h1>网站维护中</h1>
+      <p>请稍后访问</p>
+    </main></body></html>
+    "#;
+
+    const NO_EPISODES_DETAIL_HTML: &str = r#"
+    <html><head>
+      <meta property="og:image" content="https://cdn.example/poster.jpg">
+    </head><body><main>
+      <h1>示例电影</h1>
+      <span class="vtag">剧情片</span>
+      <span>2024 · 中国大陆</span>
+    </main></body></html>
+    "#;
+
+    const NO_EPISODES_WITH_LINE_DETAIL_HTML: &str = r#"
+    <html><head>
+      <meta property="og:image" content="https://cdn.example/poster.jpg">
+    </head><body><main>
+      <h1>示例电影</h1>
+      <span class="vtag">剧情片</span>
+      <button data-tab-group="detail-lines" data-tab-target="detail_line_1">云播</button>
+      <div id="detail_grid_1"></div>
+    </main></body></html>
+    "#;
+
     #[test]
     fn explicit_empty_list_is_not_parse_failure() {
         let category = parse_category_page(EXPLICIT_EMPTY_LIST_HTML, 1).expect("empty category");
@@ -1429,6 +1590,47 @@ mod tests {
         let zero_total = parse_category_page(ZERO_TOTAL_LIST_HTML, 1).expect("zero total category");
         assert!(zero_total.items.is_empty());
         assert_eq!(zero_total.total_items, Some(0));
+
+        let zero_search = parse_search_page(ZERO_TOTAL_LIST_HTML, 1).expect("zero total search");
+        assert!(zero_search.items.is_empty());
+        assert_eq!(zero_search.total_items, Some(0));
+    }
+
+    #[test]
+    fn hidden_or_unrelated_zero_total_is_not_explicit_empty() {
+        assert!(parse_category_page(HIDDEN_ZERO_TOTAL_LIST_HTML, 1).is_err());
+        assert!(parse_search_page(HIDDEN_ZERO_TOTAL_LIST_HTML, 1).is_err());
+    }
+
+    #[test]
+    fn visible_total_ignores_hidden_zero() {
+        let page =
+            parse_category_page(VISIBLE_TOTAL_WITH_HIDDEN_ZERO_HTML, 1).expect("visible total");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.total_items, Some(42));
+    }
+
+    #[test]
+    fn detail_page_requires_work_structure() {
+        assert!(parse_detail_page(MAINTENANCE_DETAIL_HTML, "/maintenance/").is_err());
+        // 仅带 h1、年份/地区的验证页也不能当成作品页。
+        assert!(parse_detail_page(
+            "<html><body><main><h1>安全验证</h1><span>2026 · 中国</span></main></body></html>",
+            "/verify/"
+        )
+        .is_err());
+
+        let no_episodes = parse_detail_page(NO_EPISODES_DETAIL_HTML, "/dianying/demo/")
+            .expect("legal detail without episodes");
+        assert_eq!(no_episodes.title, "示例电影");
+        assert!(no_episodes.lines.is_empty());
+        assert_eq!(no_episodes.category.as_deref(), Some("剧情片"));
+
+        let no_episodes_with_line =
+            parse_detail_page(NO_EPISODES_WITH_LINE_DETAIL_HTML, "/dianying/demo/")
+                .expect("legal detail with empty line");
+        assert_eq!(no_episodes_with_line.lines.len(), 1);
+        assert!(no_episodes_with_line.lines[0].episodes.is_empty());
     }
 
     #[test]
