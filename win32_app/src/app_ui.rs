@@ -27,7 +27,7 @@ const TOP_H: f32 = 56.0;
 const STATUS_H: f32 = 30.0;
 const DETAIL_POSTER_W: f32 = 176.0;
 const DETAIL_POSTER_H: f32 = 264.0;
-const MINE_ROW_H: f32 = 110.0;
+const MINE_ROW_H: f32 = 120.0;
 const SEARCH_HISTORY_WIDTH: f32 = 310.0;
 
 const HOT_KEYWORDS: &[&str] = &[
@@ -2039,7 +2039,7 @@ impl App {
                     if ui
                         .add_sized(
                             Vec2::new(92.0, 38.0),
-                            egui::Button::new("确认清空")
+                            egui::Button::new(RichText::new("确认清空").color(Color32::WHITE))
                                 .fill(colors().danger)
                                 .min_size(Vec2::new(92.0, 38.0)),
                         )
