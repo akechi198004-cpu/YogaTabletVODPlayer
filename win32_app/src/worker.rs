@@ -931,7 +931,7 @@ mod tests {
             max_stale_secs: 3600,
         };
         let parse_error: FetchError = crate::parser::parse_category_page(
-            "<html><body><main><template><span>共 0 部</span></template><aside><span>共 0 部</span></aside><div data-infinite-root></div></main></body></html>",
+            "<html><body><main><template><span>共 0 部</span></template><div><p hidden>没有找到相关内容</p></div><aside><span>共 0 部</span></aside><div data-infinite-root></div></main></body></html>",
             1,
         )
         .expect_err("hidden zero is not explicit empty")

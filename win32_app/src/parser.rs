@@ -990,19 +990,19 @@ fn parse_total_items(document: &Html) -> Option<u32> {
     let main = root.select(&sel("main")).next().unwrap_or(root);
     static TOTAL_RE: OnceLock<Regex> = OnceLock::new();
     let regex =
-        TOTAL_RE.get_or_init(|| Regex::new(r"共\s*(\d+)\s*[条个部]").expect("total items regex"));
+        TOTAL_RE.get_or_init(|| Regex::new(r"^共\s*(\d+)\s*[条个部]$").expect("total items regex"));
     let candidate_sel = sel("span, div, p, li, strong, b, small, em");
 
-    // 只接受结果区域中“自身直接文字”里的计数，避免把导航、侧栏、
-    // 推荐区或隐藏模板中的“共 0 部”当成当前结果。
+    // 只接受结果区域内、可见文本恰好为“共 N 部/条/个”的元素。
+    // 可见文本会过滤隐藏、模板和无关子树，但保留合法的内联标签。
     for node in main.select(&candidate_sel) {
         if !is_visible_result_node(&node) || is_unrelated_result_region(&node) {
             continue;
         }
-        let text = direct_text_of(&node);
-        if text.is_empty() {
+        if !contains_total_marker(&node) {
             continue;
         }
+        let text = visible_text_of(&node);
         if let Some(captures) = regex.captures(&text) {
             if let Some(value) = captures
                 .get(1)
@@ -1015,7 +1015,7 @@ fn parse_total_items(document: &Html) -> Option<u32> {
     None
 }
 
-/// 元素自身直接包含的文字；父容器拼接文字不参与总数识别。
+/// 元素自身直接包含的文字；用于快速筛选可能包含计数的候选。
 fn direct_text_of(element: &ElementRef<'_>) -> String {
     let raw: String = element
         .children()
@@ -1024,6 +1024,38 @@ fn direct_text_of(element: &ElementRef<'_>) -> String {
         .collect::<Vec<_>>()
         .join("");
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn contains_total_marker(element: &ElementRef<'_>) -> bool {
+    direct_text_of(element).contains('共')
+        || element
+            .children()
+            .filter_map(ElementRef::wrap)
+            .any(|child| direct_text_of(&child).contains('共'))
+}
+
+/// 只提取可见文字：跳过隐藏、模板、脚本和无关子树，
+/// 但保留可见的内联元素文字。
+fn visible_text_of(element: &ElementRef<'_>) -> String {
+    let mut raw = String::new();
+    append_visible_text(element, &mut raw);
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn append_visible_text(element: &ElementRef<'_>, out: &mut String) {
+    for child in element.children() {
+        if let Some(text) = child.value().as_text() {
+            out.push_str(text);
+            continue;
+        }
+        let Some(child_element) = ElementRef::wrap(child) else {
+            continue;
+        };
+        if !is_visible_result_node(&child_element) || is_unrelated_result_region(&child_element) {
+            continue;
+        }
+        append_visible_text(&child_element, out);
+    }
 }
 
 /// 结果区域之外的导航、侧栏、页脚、推荐、评论等不参与总数识别。
@@ -1094,11 +1126,20 @@ fn has_confirmed_empty_state(document: &Html) -> bool {
         return true;
     }
     for node in main.select(&sel("p, div, span")) {
-        let text = text_of(&node);
-        if EMPTY_STATE_TEXTS.iter().any(|value| *value == text)
-            && is_visible_result_node(&node)
-            && !is_unrelated_result_region(&node)
+        if !is_visible_result_node(&node) || is_unrelated_result_region(&node) {
+            continue;
+        }
+        // 先做廉价预筛；最终只比较过滤后的可见文字，
+        // 避免可见父容器把隐藏/无关子区域的文字拼接进来。
+        let full_text = text_of(&node);
+        if !EMPTY_STATE_TEXTS
+            .iter()
+            .any(|value| full_text.contains(value))
         {
+            continue;
+        }
+        let text = visible_text_of(&node);
+        if EMPTY_STATE_TEXTS.iter().any(|value| *value == text) {
             return true;
         }
     }
@@ -1522,6 +1563,24 @@ mod tests {
     </main></body></html>
     "#;
 
+    const INLINE_ZERO_TOTAL_LIST_HTML: &str = r#"
+    <html><body><main>
+      <span>共 <b>0</b> 部</span>
+    </main></body></html>
+    "#;
+
+    const INLINE_NONZERO_TOTAL_LIST_HTML: &str = r#"
+    <html><body><main>
+      <div data-infinite-root>
+        <a href="/guocanju/demo/" class="proto-rim group">
+          <img src="https://cdn.example/a.jpg" alt="示例">
+          <div class="p-2.5"><p>示例</p><span>2026</span></div>
+        </a>
+      </div>
+      <span>共 <b>42</b> 部</span>
+    </main></body></html>
+    "#;
+
     const HIDDEN_ZERO_TOTAL_LIST_HTML: &str = r#"
     <html><body><main>
       <template><span>共 0 部</span></template>
@@ -1594,12 +1653,36 @@ mod tests {
         let zero_search = parse_search_page(ZERO_TOTAL_LIST_HTML, 1).expect("zero total search");
         assert!(zero_search.items.is_empty());
         assert_eq!(zero_search.total_items, Some(0));
+
+        let inline_zero =
+            parse_category_page(INLINE_ZERO_TOTAL_LIST_HTML, 1).expect("inline zero category");
+        assert!(inline_zero.items.is_empty());
+        assert_eq!(inline_zero.total_items, Some(0));
+        let inline_zero_search =
+            parse_search_page(INLINE_ZERO_TOTAL_LIST_HTML, 1).expect("inline zero search");
+        assert!(inline_zero_search.items.is_empty());
+        assert_eq!(inline_zero_search.total_items, Some(0));
+
+        let inline_nonzero = parse_category_page(INLINE_NONZERO_TOTAL_LIST_HTML, 1)
+            .expect("inline nonzero category");
+        assert_eq!(inline_nonzero.items.len(), 1);
+        assert_eq!(inline_nonzero.total_items, Some(42));
     }
 
     #[test]
     fn hidden_or_unrelated_zero_total_is_not_explicit_empty() {
         assert!(parse_category_page(HIDDEN_ZERO_TOTAL_LIST_HTML, 1).is_err());
         assert!(parse_search_page(HIDDEN_ZERO_TOTAL_LIST_HTML, 1).is_err());
+
+        for html in [
+            "<main><div><p hidden>没有找到相关内容</p></div></main>",
+            "<main><div><p style=\"display:none\">没有找到相关内容</p></div></main>",
+            "<main><div><aside><p>没有找到相关内容</p></aside></div></main>",
+            "<main><span>共 <b hidden>0</b> 部</span></main>",
+        ] {
+            assert!(parse_category_page(html, 1).is_err(), "category: {html}");
+            assert!(parse_search_page(html, 1).is_err(), "search: {html}");
+        }
     }
 
     #[test]
