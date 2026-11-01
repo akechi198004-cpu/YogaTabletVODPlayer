@@ -1,6 +1,7 @@
 //! 主应用状态与后台事件处理。
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
@@ -150,6 +151,7 @@ pub struct App {
     user_file: PathBuf,
     cache_dir: PathBuf,
     config_load_failed: bool,
+    user_data_load_failed: bool,
     user_data: UserData,
     poster_cache: PosterCache,
 
@@ -212,13 +214,18 @@ impl App {
         theme::set_mode(config.theme);
         theme::apply(&cc.egui_ctx);
 
-        let (user_data, user_error) = match UserData::load(&paths.user_file) {
-            Ok(data) => (data, None),
-            Err(error) => (
-                UserData::default(),
-                Some(format!("收藏/历史读取失败，已使用空数据：{error}")),
-            ),
-        };
+        let (user_data, user_data_load_failed, user_error) =
+            match UserData::load_optional(&paths.user_file) {
+                Ok(Some(data)) => (data, false, None),
+                Ok(None) => (UserData::default(), false, None),
+                Err(error) => (
+                    UserData::default(),
+                    true,
+                    Some(format!(
+                        "收藏/历史文件读取失败，原文件已保留，自动保存已暂停：{error}"
+                    )),
+                ),
+            };
 
         let metadata_cache = MetadataCache::new(paths.cache_dir.join("meta"));
         let poster_cache = PosterCache::new(paths.cache_dir.join("poster"));
@@ -263,6 +270,7 @@ impl App {
             user_file: paths.user_file.clone(),
             cache_dir: paths.cache_dir.clone(),
             config_load_failed: config_error.is_some(),
+            user_data_load_failed,
             user_data,
             poster_cache,
             tab: MainTab::Home,
@@ -867,8 +875,63 @@ impl App {
     }
 
     fn save_user_data(&mut self) {
-        if let Err(error) = self.user_data.save(&self.user_file) {
-            self.set_error(format!("保存收藏/历史失败：{error}"));
+        if self.user_data_load_failed {
+            self.set_error(
+                "收藏/历史文件读取失败，已暂停自动保存以保护原文件；请到设置页恢复或重建。",
+            );
+            return;
+        }
+        match self.user_data.save_if_allowed(&self.user_file, true) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.set_error("收藏/历史文件受保护，本次修改未保存；请到设置页恢复或重建。")
+            }
+            Err(error) => self.set_error(format!("保存收藏/历史失败：{error}")),
+        }
+    }
+
+    fn retry_user_data_load(&mut self) {
+        match UserData::load_optional(&self.user_file) {
+            Ok(Some(data)) => {
+                self.user_data = data;
+                self.user_data_load_failed = false;
+                self.error_text = None;
+                self.status_text = "已重新读取收藏/历史".to_owned();
+            }
+            Ok(None) => {
+                // 失败后文件被外部移走，等同于首次运行。
+                self.user_data = UserData::default();
+                self.user_data_load_failed = false;
+                self.error_text = None;
+                self.status_text = "未发现用户数据文件，已恢复自动保存".to_owned();
+            }
+            Err(error) => {
+                self.set_error(format!("重新读取收藏/历史失败，原文件仍保留：{error}"));
+            }
+        }
+    }
+
+    /// 用户明确选择保留损坏文件后再重建，避免静默覆盖。
+    fn recover_user_data(&mut self) {
+        let backup = self
+            .user_file
+            .with_file_name(format!("user_data.json.bak-{}", now_unix()));
+        if self.user_file.exists() {
+            if let Err(error) = fs::rename(&self.user_file, &backup) {
+                self.set_error(format!("备份原用户数据失败，未做任何覆盖：{error}"));
+                return;
+            }
+        }
+        self.user_data = UserData::default();
+        self.user_data_load_failed = false;
+        self.error_text = None;
+        self.save_user_data();
+        if self.error_text.is_none() {
+            self.status_text = if backup.exists() {
+                format!("已备份原文件到 {} 并重建用户数据", backup.display())
+            } else {
+                "已重建用户数据".to_owned()
+            };
         }
     }
 

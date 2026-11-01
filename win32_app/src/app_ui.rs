@@ -28,6 +28,8 @@ const STATUS_H: f32 = 30.0;
 const DETAIL_POSTER_W: f32 = 176.0;
 const DETAIL_POSTER_H: f32 = 264.0;
 const MINE_ROW_H: f32 = 120.0;
+/// 分页栏高度预留：6px 间距 + 32px 按钮 + 余量。
+const PAGER_RESERVED_H: f32 = 46.0;
 const SEARCH_HISTORY_WIDTH: f32 = 310.0;
 
 const HOT_KEYWORDS: &[&str] = &[
@@ -312,7 +314,7 @@ impl App {
             draw_empty(ui, "首页暂时没有推荐内容，稍后再来看看。");
             return;
         }
-        if let Some(item) = self.draw_grid(ui, ctx, home.recent, false, ()) {
+        if let Some(item) = self.draw_grid(ui, ctx, home.recent, false, 0.0, ()) {
             self.open_detail(item);
         }
     }
@@ -441,6 +443,7 @@ impl App {
         ctx: &egui::Context,
         items: Vec<WorkItem>,
         show_rank: bool,
+        reserved_bottom: f32,
         grid_key: impl std::hash::Hash,
     ) -> Option<WorkItem> {
         let mut clicked = None;
@@ -451,9 +454,11 @@ impl App {
         let row_h = poster_grid::row_height(card_w);
         let row_count = items.len().div_ceil(columns);
         let grid_id = self.browse.id;
+        let grid_max_height = (ui.available_height() - reserved_bottom.max(0.0)).max(120.0);
 
         egui::ScrollArea::vertical()
             .id_source(("poster_grid", grid_id, grid_key))
+            .max_height(grid_max_height)
             .auto_shrink([false, false])
             .show_viewport(ui, |ui, viewport| {
                 ui.set_width(width);
@@ -709,7 +714,14 @@ impl App {
                 }
                 if page.items.is_empty() {
                     draw_empty(ui, "没有符合当前条件的影片，请更换条件或重置筛选。");
-                } else if let Some(item) = self.draw_grid(ui, ctx, page.items, false, page.page) {
+                } else if let Some(item) = self.draw_grid(
+                    ui,
+                    ctx,
+                    page.items,
+                    false,
+                    pager_reserved_height(page.total_pages),
+                    page.page,
+                ) {
                     self.open_detail(item);
                 }
                 if let Some(delta) = pager(ui, page.page, page.total_pages) {
@@ -779,7 +791,7 @@ impl App {
             draw_empty(ui, "这份榜单暂时没有内容。");
             return;
         }
-        if let Some(item) = self.draw_grid(ui, ctx, items, true, self.top_period) {
+        if let Some(item) = self.draw_grid(ui, ctx, items, true, 0.0, self.top_period) {
             self.open_detail(item);
         }
     }
@@ -828,7 +840,14 @@ impl App {
             draw_empty(ui, "暂时没有更新内容，稍后再来看看。");
             return;
         }
-        if let Some(item) = self.draw_grid(ui, ctx, page_items, false, self.daily_page) {
+        if let Some(item) = self.draw_grid(
+            ui,
+            ctx,
+            page_items,
+            false,
+            pager_reserved_height(page_count as u32),
+            self.daily_page,
+        ) {
             self.open_detail(item);
         }
         if let Some(delta) = pager(ui, self.daily_page, page_count as u32) {
@@ -1125,7 +1144,14 @@ impl App {
                         self.search_text = word;
                         self.submit_search_text();
                     }
-                } else if let Some(item) = self.draw_grid(ui, ctx, page.items, false, page.page) {
+                } else if let Some(item) = self.draw_grid(
+                    ui,
+                    ctx,
+                    page.items,
+                    false,
+                    pager_reserved_height(page.total_pages),
+                    page.page,
+                ) {
                     self.open_detail(item);
                 }
                 if let Some(delta) = pager(ui, page.page, page.total_pages) {
@@ -1484,6 +1510,8 @@ impl App {
             .unwrap_or_else(|| SettingsDraft::from_config(&self.config));
         let mut back = false;
         let mut save = false;
+        let mut retry_user_data = false;
+        let mut recover_user_data = false;
 
         egui::CentralPanel::default()
             .frame(Frame::none().fill(colors().bg))
@@ -1542,6 +1570,44 @@ impl App {
                                             .size(12.0)
                                             .color(colors().danger),
                                         );
+                                    });
+                                ui.add_space(12.0);
+                            }
+                            if self.user_data_load_failed {
+                                Frame::none()
+                                    .fill(colors().danger_bg)
+                                    .rounding(Rounding::same(10.0))
+                                    .inner_margin(Margin::same(12.0))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(
+                                                "收藏/历史文件读取失败。原文件已保留，自动保存已暂停，避免空数据覆盖。",
+                                            )
+                                            .size(12.0)
+                                            .color(colors().danger),
+                                        );
+                                        ui.add_space(8.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 8.0;
+                                            if ui
+                                                .add_sized(
+                                                    Vec2::new(96.0, 32.0),
+                                                    egui::Button::new("重试读取"),
+                                                )
+                                                .clicked()
+                                            {
+                                                retry_user_data = true;
+                                            }
+                                            if ui
+                                                .add_sized(
+                                                    Vec2::new(152.0, 32.0),
+                                                    egui::Button::new("备份原文件并重建"),
+                                                )
+                                                .clicked()
+                                            {
+                                                recover_user_data = true;
+                                            }
+                                        });
                                     });
                                 ui.add_space(12.0);
                             }
@@ -1636,6 +1702,12 @@ impl App {
                 });
             });
 
+        if retry_user_data {
+            self.retry_user_data_load();
+        }
+        if recover_user_data {
+            self.recover_user_data();
+        }
         if back {
             self.settings_draft = None;
             self.show_settings = false;
@@ -2176,6 +2248,14 @@ fn section_header(
     ui.add_space(2.0);
 }
 
+fn pager_reserved_height(total_pages: u32) -> f32 {
+    if total_pages > 1 {
+        PAGER_RESERVED_H
+    } else {
+        0.0
+    }
+}
+
 fn pager(ui: &mut egui::Ui, page: u32, total_pages: u32) -> Option<i32> {
     if total_pages <= 1 {
         return None;
@@ -2532,5 +2612,52 @@ mod tests {
         assert!((uv.min.y - 0.0).abs() < 0.001);
         assert!((uv.max.x - 1.0).abs() < 0.001);
         assert!((uv.max.y - 1.0).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod pagination_layout_tests {
+    use super::*;
+
+    #[test]
+    fn pager_remains_visible_when_grid_scrolls() {
+        for (width, height) in [(1280.0, 800.0), (960.0, 600.0)] {
+            // 顶栏 56 + 状态栏 30 + 中央面板上下留白 16。
+            let central_height = height - 102.0;
+            let ctx = egui::Context::default();
+            let mut pager_bottom = 0.0;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, central_height),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // 模拟分类/搜索/更新页筛选与结果标题占用。
+                    ui.add_space(170.0);
+                    let reserved = pager_reserved_height(3);
+                    let grid_height = (ui.available_height() - reserved).max(120.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(grid_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_height(3000.0);
+                            ui.label("grid");
+                        });
+                    pager(ui, 1, 3);
+                    pager_bottom = ui.min_rect().bottom();
+                });
+            });
+            assert!(
+                pager_bottom <= central_height + 0.5,
+                "{width}x{height}: pager bottom {pager_bottom} exceeds central area"
+            );
+            assert!(
+                pager_bottom > central_height * 0.5,
+                "pager should be near bottom"
+            );
+        }
     }
 }

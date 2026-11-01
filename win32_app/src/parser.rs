@@ -1,6 +1,7 @@
 //! 星帆影视 HTML 解析。
 //!
-//! 站点结构可能调整；解析失败时返回空结果而不是 panic，界面会展示可重试的错误。
+//! 站点结构可能调整；可识别的页面返回数据，明确空结果保留为空，
+//! 无法识别的页面返回 [`ParseError`]，由上层回退旧缓存或显示重试错误。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -8,12 +9,18 @@ use std::sync::OnceLock;
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::models::{
     ChipOption, Episode, FilterOptions, HeroSlide, HomeData, PageResult, PlayLine, TopBoards,
     WorkDetail, WorkItem, WorkLine,
 };
 use crate::source::{is_detail_path, is_episode_path, ALL_CATEGORIES, DEFAULT_SOURCE_BASE};
+
+/// 页面无法识别：与“明确的空结果”区分，用于触发旧缓存回退或可重试错误。
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("{0}")]
+pub struct ParseError(pub &'static str);
 
 const EMPTY_STATE_TEXTS: &[&str] = &[
     "没有找到相关内容",
@@ -58,7 +65,7 @@ fn detail_title(root: &ElementRef<'_>) -> String {
         .unwrap_or_default()
 }
 
-pub fn parse_home_page(html: &str) -> HomeData {
+pub fn parse_home_page(html: &str) -> Result<HomeData, ParseError> {
     let document = Html::parse_document(html);
     let root = document.root_element();
     let mut hero = Vec::new();
@@ -171,10 +178,13 @@ pub fn parse_home_page(html: &str) -> HomeData {
         });
     }
 
-    HomeData { hero, recent }
+    if hero.is_empty() && recent.is_empty() {
+        return Err(ParseError("首页结构无法识别：未找到精选或最近更新条目"));
+    }
+    Ok(HomeData { hero, recent })
 }
 
-pub fn parse_category_page(html: &str, requested_page: u32) -> PageResult {
+pub fn parse_category_page(html: &str, requested_page: u32) -> Result<PageResult, ParseError> {
     let document = Html::parse_document(html);
     let root = document.root_element();
     let card_sel = sel("a.proto-rim");
@@ -233,15 +243,15 @@ pub fn parse_category_page(html: &str, requested_page: u32) -> PageResult {
     }
 
     let (page, total_pages) = parse_pagination(&document);
-    let confirmed_empty = items.is_empty() && has_confirmed_empty_state(&document);
-    let total_items = if confirmed_empty {
-        Some(0)
-    } else if items.is_empty() {
-        None
-    } else {
-        parse_total_items(&document)
-    };
-    PageResult {
+    let total_items = parse_total_items(&document);
+    let confirmed_empty =
+        items.is_empty() && (has_confirmed_empty_state(&document) || total_items == Some(0));
+    if items.is_empty() && !confirmed_empty {
+        return Err(ParseError(
+            "分类页结构无法识别：未找到作品，也没有明确的空结果提示",
+        ));
+    }
+    Ok(PageResult {
         items,
         page: if requested_page > 0 {
             requested_page
@@ -249,12 +259,16 @@ pub fn parse_category_page(html: &str, requested_page: u32) -> PageResult {
             page
         },
         total_pages,
-        total_items,
+        total_items: if confirmed_empty {
+            Some(0)
+        } else {
+            total_items
+        },
         filters: Some(parse_filter_options(&document)),
-    }
+    })
 }
 
-pub fn parse_search_page(html: &str, requested_page: u32) -> PageResult {
+pub fn parse_search_page(html: &str, requested_page: u32) -> Result<PageResult, ParseError> {
     let document = Html::parse_document(html);
     let root = document.root_element();
     let card_sel = sel("a.rim-card");
@@ -309,15 +323,15 @@ pub fn parse_search_page(html: &str, requested_page: u32) -> PageResult {
     }
 
     let (page, total_pages) = parse_pagination(&document);
-    let confirmed_empty = items.is_empty() && has_confirmed_empty_state(&document);
-    let total_items = if confirmed_empty {
-        Some(0)
-    } else if items.is_empty() {
-        None
-    } else {
-        parse_total_items(&document)
-    };
-    PageResult {
+    let total_items = parse_total_items(&document);
+    let confirmed_empty =
+        items.is_empty() && (has_confirmed_empty_state(&document) || total_items == Some(0));
+    if items.is_empty() && !confirmed_empty {
+        return Err(ParseError(
+            "搜索页结构无法识别：未找到结果，也没有明确的空结果提示",
+        ));
+    }
+    Ok(PageResult {
         items,
         page: if requested_page > 0 {
             requested_page
@@ -325,12 +339,16 @@ pub fn parse_search_page(html: &str, requested_page: u32) -> PageResult {
             page
         },
         total_pages,
-        total_items,
+        total_items: if confirmed_empty {
+            Some(0)
+        } else {
+            total_items
+        },
         filters: None,
-    }
+    })
 }
 
-pub fn parse_daily_page(html: &str) -> Vec<WorkItem> {
+pub fn parse_daily_page(html: &str) -> Result<Vec<WorkItem>, ParseError> {
     let document = Html::parse_document(html);
     let root = document.root_element();
     let card_sel = sel("a.update-card");
@@ -371,10 +389,13 @@ pub fn parse_daily_page(html: &str) -> Vec<WorkItem> {
             rank: None,
         });
     }
-    items
+    if items.is_empty() {
+        return Err(ParseError("更新页结构无法识别：未找到有效更新条目"));
+    }
+    Ok(items)
 }
 
-pub fn parse_top_page(html: &str) -> TopBoards {
+pub fn parse_top_page(html: &str) -> Result<TopBoards, ParseError> {
     let document = Html::parse_document(html);
     let root = document.root_element();
     let box_sel = sel("div.space-y-2");
@@ -463,10 +484,13 @@ pub fn parse_top_page(html: &str) -> TopBoards {
         }
     }
 
-    TopBoards { day, week, month }
+    if day.is_empty() && week.is_empty() && month.is_empty() {
+        return Err(ParseError("榜单页结构无法识别：未找到榜单条目"));
+    }
+    Ok(TopBoards { day, week, month })
 }
 
-pub fn parse_detail_page(html: &str, detail_url: &str) -> WorkDetail {
+pub fn parse_detail_page(html: &str, detail_url: &str) -> Result<WorkDetail, ParseError> {
     let document = Html::parse_document(html);
     let root = document.root_element();
     let h1_sel = sel("h1");
@@ -663,7 +687,10 @@ pub fn parse_detail_page(html: &str, detail_url: &str) -> WorkDetail {
         }
     }
 
-    WorkDetail {
+    if title.trim().is_empty() {
+        return Err(ParseError("详情页结构无法识别：未找到作品标题"));
+    }
+    Ok(WorkDetail {
         title: title.trim().to_owned(),
         url: detail_url.to_owned(),
         poster,
@@ -673,7 +700,7 @@ pub fn parse_detail_page(html: &str, detail_url: &str) -> WorkDetail {
         description,
         total_episodes,
         lines,
-    }
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1257,14 +1284,14 @@ mod tests {
         let home_page = client
             .fetch_page_conditional("/", None, None, None)
             .expect("home");
-        let home = parse_home_page(&home_page.html);
+        let home = parse_home_page(&home_page.html).expect("home parse");
         println!("home hero={} recent={}", home.hero.len(), home.recent.len());
         assert!(!home.recent.is_empty());
 
         let category_page = client
             .fetch_page_conditional("/dianying/", None, None, None)
             .expect("category");
-        let category = parse_category_page(&category_page.html, 1);
+        let category = parse_category_page(&category_page.html, 1).expect("category parse");
         println!(
             "category items={} pages={} total={:?}",
             category.items.len(),
@@ -1278,7 +1305,7 @@ mod tests {
             let detail_page = client
                 .fetch_page_conditional(&item.url, None, None, None)
                 .expect("detail");
-            let detail = parse_detail_page(&detail_page.html, &item.url);
+            let detail = parse_detail_page(&detail_page.html, &item.url).expect("detail parse");
             println!(
                 "detail {} lines={} title={}",
                 item.url,
@@ -1308,7 +1335,7 @@ mod tests {
         let search_page = client
             .fetch_page_conditional("/search/?wd=%E7%B9%81%E8%8A%B1", None, None, None)
             .expect("search");
-        let search = parse_search_page(&search_page.html, 1);
+        let search = parse_search_page(&search_page.html, 1).expect("search parse");
         println!(
             "search items={} pages={}",
             search.items.len(),
@@ -1319,7 +1346,7 @@ mod tests {
         let top_page = client
             .fetch_page_conditional("/top.html", None, None, None)
             .expect("top");
-        let top = parse_top_page(&top_page.html);
+        let top = parse_top_page(&top_page.html).expect("top parse");
         println!(
             "top day={} week={} month={}",
             top.day.len(),
@@ -1331,7 +1358,7 @@ mod tests {
         let daily_page = client
             .fetch_page_conditional("/new.html", None, None, None)
             .expect("daily");
-        let daily = parse_daily_page(&daily_page.html);
+        let daily = parse_daily_page(&daily_page.html).expect("daily parse");
         println!("daily items={}", daily.len());
         assert!(!daily.is_empty());
 
@@ -1343,14 +1370,15 @@ mod tests {
                 None,
             )
             .expect("filtered category");
-        let filtered = parse_category_page(&filtered_page.html, 1);
+        let filtered = parse_category_page(&filtered_page.html, 1).expect("filtered parse");
         println!("filtered category items={}", filtered.items.len());
         assert!(!filtered.items.is_empty());
 
         let known_page = client
             .fetch_page_conditional("/oumeiju/heibanglingdidierji/", None, None, None)
             .expect("known detail");
-        let known = parse_detail_page(&known_page.html, "/oumeiju/heibanglingdidierji/");
+        let known = parse_detail_page(&known_page.html, "/oumeiju/heibanglingdidierji/")
+            .expect("known parse");
         println!(
             "known detail lines={} episodes={} year={:?} area={:?}",
             known.lines.len(),
@@ -1367,9 +1395,55 @@ mod tests {
         assert_ne!(known.area.as_deref(), Some("热播中"));
     }
 
+    const EXPLICIT_EMPTY_LIST_HTML: &str = r#"
+    <html><body><main>
+      <div data-infinite-root></div>
+      <p>没有找到相关内容</p>
+    </main></body></html>
+    "#;
+
+    const UNRECOGNIZED_LIST_HTML: &str = r#"
+    <html><body><main>
+      <div data-infinite-root></div>
+      <div class="pagination-wrap"><li class="active"><span>1</span></li></div>
+    </main></body></html>
+    "#;
+
+    const ZERO_TOTAL_LIST_HTML: &str = r#"
+    <html><body><main>
+      <div data-infinite-root></div>
+      <span>共 0 部</span>
+    </main></body></html>
+    "#;
+
+    #[test]
+    fn explicit_empty_list_is_not_parse_failure() {
+        let category = parse_category_page(EXPLICIT_EMPTY_LIST_HTML, 1).expect("empty category");
+        assert!(category.items.is_empty());
+        assert_eq!(category.total_items, Some(0));
+
+        let search = parse_search_page(EXPLICIT_EMPTY_LIST_HTML, 1).expect("empty search");
+        assert!(search.items.is_empty());
+        assert_eq!(search.total_items, Some(0));
+
+        let zero_total = parse_category_page(ZERO_TOTAL_LIST_HTML, 1).expect("zero total category");
+        assert!(zero_total.items.is_empty());
+        assert_eq!(zero_total.total_items, Some(0));
+    }
+
+    #[test]
+    fn unrecognized_pages_are_parse_failures() {
+        assert!(parse_home_page("<html><body></body></html>").is_err());
+        assert!(parse_category_page(UNRECOGNIZED_LIST_HTML, 1).is_err());
+        assert!(parse_search_page(UNRECOGNIZED_LIST_HTML, 1).is_err());
+        assert!(parse_daily_page("<html><body></body></html>").is_err());
+        assert!(parse_top_page("<html><body></body></html>").is_err());
+        assert!(parse_detail_page("<html><body><p>无标题</p></body></html>", "/x/").is_err());
+    }
+
     #[test]
     fn parses_home_hero_and_cards() {
-        let home = parse_home_page(HOME_HTML);
+        let home = parse_home_page(HOME_HTML).expect("home");
         assert_eq!(home.hero.len(), 1);
         assert_eq!(home.hero[0].title, "示例剧");
         assert_eq!(home.hero[0].year.as_deref(), Some("2026"));
@@ -1388,7 +1462,7 @@ mod tests {
 
     #[test]
     fn parses_category_pagination_and_filters() {
-        let page = parse_category_page(CATEGORY_HTML, 2);
+        let page = parse_category_page(CATEGORY_HTML, 2).expect("category");
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.total_pages, 3);
         assert_eq!(page.total_items, Some(48));
@@ -1400,7 +1474,7 @@ mod tests {
 
     #[test]
     fn parses_detail_lines_and_episodes() {
-        let detail = parse_detail_page(DETAIL_HTML, "/guocanju/demo/");
+        let detail = parse_detail_page(DETAIL_HTML, "/guocanju/demo/").expect("detail");
         assert_eq!(detail.title, "示例剧");
         assert_eq!(detail.year.as_deref(), Some("2026"));
         assert_eq!(detail.area.as_deref(), Some("中国大陆"));

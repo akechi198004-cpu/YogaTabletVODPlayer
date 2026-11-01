@@ -129,20 +129,36 @@ pub struct UserData {
 }
 
 impl UserData {
-    pub fn load(path: &Path) -> Result<Self, UserDataError> {
+    /// 读取用户数据。`Ok(None)` 表示文件尚不存在（首次运行），
+    /// `Err` 表示文件存在但读取/解析失败；调用方应保护原文件。
+    pub fn load_optional(path: &Path) -> Result<Option<Self>, UserDataError> {
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(None);
         }
         let content = fs::read_to_string(path)?;
         let mut data = serde_json::from_str::<Self>(content.trim_start_matches('\u{feff}'))?;
         data.normalize();
-        Ok(data)
+        Ok(Some(data))
     }
 
     pub fn save(&self, path: &Path) -> Result<(), UserDataError> {
         let content = serde_json::to_vec_pretty(self)?;
         atomic_write(path, &content)?;
         Ok(())
+    }
+
+    /// 加载失败后禁止自动保存，避免用空数据覆盖原文件。
+    /// 返回 false 表示因保护策略未写入。
+    pub fn save_if_allowed(
+        &self,
+        path: &Path,
+        allow_overwrite: bool,
+    ) -> Result<bool, UserDataError> {
+        if !allow_overwrite {
+            return Ok(false);
+        }
+        self.save(path)?;
+        Ok(true)
     }
 
     fn normalize(&mut self) {
@@ -402,5 +418,53 @@ mod tests {
         data.record_search("关键词14");
         assert_eq!(data.search_history.len(), 10);
         assert_eq!(data.search_history[0], "关键词14");
+    }
+
+    #[test]
+    fn missing_user_data_is_distinct_from_corrupt_file() {
+        let missing = temp_path("user-missing");
+        assert!(UserData::load_optional(&missing)
+            .expect("missing")
+            .is_none());
+
+        let corrupt = temp_path("user-corrupt");
+        fs::write(&corrupt, b"{not-json").expect("write corrupt");
+        assert!(UserData::load_optional(&corrupt).is_err());
+        assert_eq!(fs::read(&corrupt).expect("original"), b"{not-json");
+        let _ = fs::remove_file(corrupt);
+    }
+
+    #[test]
+    fn guarded_save_after_load_failure_keeps_original_file() {
+        let path = temp_path("user-guard");
+        fs::write(&path, b"{broken-user-data").expect("write corrupt");
+
+        let load_failed = UserData::load_optional(&path).is_err();
+        assert!(load_failed);
+
+        let empty = UserData::default();
+        let written = empty
+            .save_if_allowed(&path, !load_failed)
+            .expect("guarded save");
+        assert!(!written);
+        assert_eq!(fs::read(&path).expect("original"), b"{broken-user-data");
+
+        // 用户显式恢复/重建后允许写入新文件。
+        let written = empty.save_if_allowed(&path, true).expect("allowed save");
+        assert!(written);
+        assert!(UserData::load_optional(&path).expect("load new").is_some());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn user_data_load_round_trip() {
+        let path = temp_path("user-roundtrip");
+        let data = UserData::default();
+        data.save(&path).expect("save");
+        let loaded = UserData::load_optional(&path)
+            .expect("load")
+            .expect("existing");
+        assert!(loaded.favorites.is_empty());
+        let _ = fs::remove_file(path);
     }
 }

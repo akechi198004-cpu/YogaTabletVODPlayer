@@ -9,39 +9,65 @@ Set-Location $Root
 $Target = "i686-pc-windows-msvc"
 $BinName = "hm-video-win32"
 $PackageName = "HMVideo-win32"
+$DistRoot = Join-Path $Root "dist"
+$PackageRoot = Join-Path $DistRoot $PackageName
+$ZipPath = Join-Path $DistRoot "$PackageName.zip"
+$ExePath = Join-Path $Root "target/$Target/release/$BinName.exe"
+
+function Assert-LastExitCode {
+    param([string]$Step)
+    if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
+        $code = if ($null -eq $LASTEXITCODE) { "unknown" } else { $LASTEXITCODE }
+        throw "$Step 失败（退出码 $code），已停止打包。"
+    }
+}
+
+# 先移除旧发布包和旧 EXE，避免失败时误用上一次的产物。
+if (Test-Path $ZipPath) {
+    Remove-Item $ZipPath -Force -ErrorAction Stop
+}
+if (Test-Path $PackageRoot) {
+    Remove-Item $PackageRoot -Recurse -Force -ErrorAction Stop
+}
+if (Test-Path $ExePath) {
+    Remove-Item $ExePath -Force -ErrorAction Stop
+}
 
 Write-Host "==> 检查 Rust 目标 $Target"
 rustup target add $Target | Out-Host
+Assert-LastExitCode "rustup target add $Target"
 
 Write-Host "==> cargo test"
 cargo test | Out-Host
+Assert-LastExitCode "cargo test"
 
 Write-Host "==> cargo build --release --target $Target"
 cargo build --release --target $Target | Out-Host
+Assert-LastExitCode "cargo build --release --target $Target"
 
-$DistRoot = Join-Path $Root "dist"
-$PackageRoot = Join-Path $DistRoot $PackageName
-if (Test-Path $PackageRoot) {
-    Remove-Item $PackageRoot -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
-
-$ExePath = Join-Path $Root "target/$Target/release/$BinName.exe"
 if (-not (Test-Path $ExePath)) {
     throw "未找到构建产物：$ExePath"
 }
 
-Copy-Item $ExePath (Join-Path $PackageRoot "$BinName.exe")
-Copy-Item (Join-Path $Root "assets/DroidSansFallbackFull.ttf") (Join-Path $PackageRoot "DroidSansFallbackFull.ttf")
-Copy-Item (Join-Path $Root "assets/DroidSansFallbackFull.LICENSE.txt") (Join-Path $PackageRoot "DroidSansFallbackFull.LICENSE.txt")
-Copy-Item (Join-Path $Root "packaging/windows/config.toml") (Join-Path $PackageRoot "config.toml")
-Copy-Item (Join-Path $Root "README.md") (Join-Path $PackageRoot "README.md")
+New-Item -ItemType Directory -Force -Path $PackageRoot -ErrorAction Stop | Out-Null
 
-$ZipPath = Join-Path $DistRoot "$PackageName.zip"
-if (Test-Path $ZipPath) {
-    Remove-Item $ZipPath -Force
+Copy-Item $ExePath (Join-Path $PackageRoot "$BinName.exe") -ErrorAction Stop
+Copy-Item (Join-Path $Root "assets/DroidSansFallbackFull.ttf") (Join-Path $PackageRoot "DroidSansFallbackFull.ttf") -ErrorAction Stop
+Copy-Item (Join-Path $Root "assets/DroidSansFallbackFull.LICENSE.txt") (Join-Path $PackageRoot "DroidSansFallbackFull.LICENSE.txt") -ErrorAction Stop
+Copy-Item (Join-Path $Root "packaging/windows/config.toml") (Join-Path $PackageRoot "config.toml") -ErrorAction Stop
+Copy-Item (Join-Path $Root "README.md") (Join-Path $PackageRoot "README.md") -ErrorAction Stop
+
+try {
+    Compress-Archive -Path $PackageRoot -DestinationPath $ZipPath -Force -ErrorAction Stop
+} catch {
+    if (Test-Path $ZipPath) {
+        Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+    }
+    throw
 }
-Compress-Archive -Path $PackageRoot -DestinationPath $ZipPath -Force
+if (-not (Test-Path $ZipPath)) {
+    throw "压缩包未生成：$ZipPath"
+}
 
 Write-Host ""
 Write-Host "完成：$ZipPath"

@@ -174,6 +174,15 @@ impl From<SourceError> for FetchError {
     }
 }
 
+impl From<crate::parser::ParseError> for FetchError {
+    fn from(error: crate::parser::ParseError) -> Self {
+        Self {
+            message: error.to_string(),
+            gone: false,
+        }
+    }
+}
+
 enum Fetched<T> {
     NotModified {
         etag: Option<String>,
@@ -195,7 +204,8 @@ fn cache_key(source_base: &str, key: &str) -> String {
     format!("{base}|{key}")
 }
 
-/// 缓存优先读取；过期后请求网络，失败时在“最长可展示”窗口内使用旧缓存。
+/// 缓存优先读取；过期后请求网络。网络或页面解析失败时，
+/// 在“最长可展示”窗口内使用旧缓存，否则返回可重试错误。
 fn load_cached<T, F>(
     cache: &MetadataCache,
     source_base: &str,
@@ -300,7 +310,7 @@ fn load_browse(
                         });
                     }
                     Ok(Fetched::Loaded {
-                        data: parser::parse_home_page(&page.html),
+                        data: parser::parse_home_page(&page.html)?,
                         etag: page.etag,
                         last_modified: page.last_modified,
                     })
@@ -339,7 +349,7 @@ fn load_browse(
                         });
                     }
                     Ok(Fetched::Loaded {
-                        data: parser::parse_category_page(&page.html, requested_page),
+                        data: parser::parse_category_page(&page.html, requested_page)?,
                         etag: page.etag,
                         last_modified: page.last_modified,
                     })
@@ -366,7 +376,7 @@ fn load_browse(
                         });
                     }
                     Ok(Fetched::Loaded {
-                        data: parser::parse_top_page(&page.html),
+                        data: parser::parse_top_page(&page.html)?,
                         etag: page.etag,
                         last_modified: page.last_modified,
                     })
@@ -391,7 +401,7 @@ fn load_browse(
                         });
                     }
                     Ok(Fetched::Loaded {
-                        data: parser::parse_daily_page(&page.html),
+                        data: parser::parse_daily_page(&page.html)?,
                         etag: page.etag,
                         last_modified: page.last_modified,
                     })
@@ -422,7 +432,7 @@ fn load_browse(
                         });
                     }
                     Ok(Fetched::Loaded {
-                        data: parser::parse_search_page(&page.html, requested_page),
+                        data: parser::parse_search_page(&page.html, requested_page)?,
                         etag: page.etag,
                         last_modified: page.last_modified,
                     })
@@ -457,7 +467,7 @@ fn load_detail(
                 });
             }
             Ok(Fetched::Loaded {
-                data: parser::parse_detail_page(&page.html, url),
+                data: parser::parse_detail_page(&page.html, url)?,
                 etag: page.etag,
                 last_modified: page.last_modified,
             })
@@ -817,4 +827,256 @@ pub fn spawn_workers(
     }
 
     (command_tx, event_rx, poster_txs)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+    use crate::cache::MetadataCache;
+    use crate::models::WorkItem;
+
+    static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_cache(name: &str) -> (std::path::PathBuf, MetadataCache) {
+        let root = std::env::temp_dir().join(format!(
+            "hm-win32-worker-{name}-{}-{}",
+            std::process::id(),
+            TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        (root.clone(), MetadataCache::new(root))
+    }
+
+    fn page(title: &str, total_items: Option<u32>) -> PageResult {
+        PageResult {
+            items: vec![WorkItem {
+                title: title.to_owned(),
+                url: format!("/demo/{title}/"),
+                poster: String::new(),
+                ..WorkItem::default()
+            }],
+            page: 1,
+            total_pages: 2,
+            total_items,
+            filters: None,
+        }
+    }
+
+    fn empty_page() -> PageResult {
+        PageResult {
+            items: Vec::new(),
+            page: 1,
+            total_pages: 1,
+            total_items: Some(0),
+            filters: None,
+        }
+    }
+
+    const SOURCE: &str = "https://example.test";
+
+    #[test]
+    fn parse_failure_falls_back_to_usable_cache() {
+        let (root, cache) = temp_cache("fallback");
+        cache
+            .store(
+                &cache_key(SOURCE, "list:/demo/"),
+                &page("cached", Some(1)),
+                Some("etag"),
+                None,
+            )
+            .expect("store");
+        let policy = CachePolicy {
+            fresh_secs: 0,
+            max_stale_secs: 3600,
+        };
+        let parse_error: FetchError = crate::parser::parse_category_page(
+            "<html><body><main><div data-infinite-root></div></main></body></html>",
+            1,
+        )
+        .expect_err("unrecognized list")
+        .into();
+        let result = load_cached(
+            &cache,
+            SOURCE,
+            "list:/demo/",
+            policy,
+            false,
+            |data: &PageResult| !data.items.is_empty(),
+            move |_, _| Err(parse_error),
+        )
+        .expect("fallback");
+        assert_eq!(result.0.items[0].title, "cached");
+        assert!(result.1);
+        assert!(cache
+            .load::<PageResult>(&cache_key(SOURCE, "list:/demo/"))
+            .is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parse_failure_without_cache_is_retryable_error() {
+        let (root, cache) = temp_cache("no-cache");
+        let policy = CachePolicy {
+            fresh_secs: 0,
+            max_stale_secs: 3600,
+        };
+        let error = load_cached(
+            &cache,
+            SOURCE,
+            "list:/missing/",
+            policy,
+            false,
+            |_: &PageResult| true,
+            |_, _| {
+                Err(FetchError {
+                    message: "页面结构无法识别".to_owned(),
+                    gone: false,
+                })
+            },
+        )
+        .expect_err("no cache");
+        assert!(error.contains("无法识别"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_empty_result_is_cacheable() {
+        let (root, cache) = temp_cache("empty");
+        let policy = CachePolicy {
+            fresh_secs: 0,
+            max_stale_secs: 3600,
+        };
+        let result = load_cached(
+            &cache,
+            SOURCE,
+            "search:/empty/",
+            policy,
+            false,
+            |data: &PageResult| !data.items.is_empty() || data.total_items == Some(0),
+            |_, _| {
+                Ok(Fetched::Loaded {
+                    data: empty_page(),
+                    etag: Some("empty-etag".to_owned()),
+                    last_modified: None,
+                })
+            },
+        )
+        .expect("empty result");
+        assert!(result.0.items.is_empty());
+        assert_eq!(result.0.total_items, Some(0));
+        assert!(!result.1);
+        assert!(cache
+            .load::<PageResult>(&cache_key(SOURCE, "search:/empty/"))
+            .is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn not_modified_renews_cache_entry() {
+        let (root, cache) = temp_cache("304");
+        cache
+            .store(
+                &cache_key(SOURCE, "list:/demo/"),
+                &page("cached", Some(1)),
+                Some("old-etag"),
+                None,
+            )
+            .expect("store");
+        let policy = CachePolicy {
+            fresh_secs: 0,
+            max_stale_secs: 3600,
+        };
+        let result = load_cached(
+            &cache,
+            SOURCE,
+            "list:/demo/",
+            policy,
+            false,
+            |data: &PageResult| !data.items.is_empty(),
+            |_, _| {
+                Ok(Fetched::NotModified {
+                    etag: Some("new-etag".to_owned()),
+                    last_modified: None,
+                })
+            },
+        )
+        .expect("304");
+        assert_eq!(result.0.items[0].title, "cached");
+        assert!(result.1);
+        let entry = cache
+            .load::<PageResult>(&cache_key(SOURCE, "list:/demo/"))
+            .expect("cache");
+        assert_eq!(entry.etag.as_deref(), Some("new-etag"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gone_response_removes_cache() {
+        let (root, cache) = temp_cache("gone");
+        cache
+            .store(
+                &cache_key(SOURCE, "list:/demo/"),
+                &page("cached", Some(1)),
+                None,
+                None,
+            )
+            .expect("store");
+        let policy = CachePolicy {
+            fresh_secs: 0,
+            max_stale_secs: 3600,
+        };
+        let error = load_cached(
+            &cache,
+            SOURCE,
+            "list:/demo/",
+            policy,
+            false,
+            |data: &PageResult| !data.items.is_empty(),
+            |_, _| {
+                Err(FetchError {
+                    message: "HTTP 404".to_owned(),
+                    gone: true,
+                })
+            },
+        )
+        .expect_err("gone");
+        assert!(error.contains("404"));
+        assert!(cache
+            .load::<PageResult>(&cache_key(SOURCE, "list:/demo/"))
+            .is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normal_result_replaces_cache() {
+        let (root, cache) = temp_cache("normal");
+        let policy = CachePolicy {
+            fresh_secs: 0,
+            max_stale_secs: 3600,
+        };
+        let result = load_cached(
+            &cache,
+            SOURCE,
+            "list:/demo/",
+            policy,
+            false,
+            |data: &PageResult| !data.items.is_empty(),
+            |_, _| {
+                Ok(Fetched::Loaded {
+                    data: page("fresh", Some(24)),
+                    etag: Some("fresh-etag".to_owned()),
+                    last_modified: None,
+                })
+            },
+        )
+        .expect("normal");
+        assert_eq!(result.0.items[0].title, "fresh");
+        assert!(!result.1);
+        assert!(cache
+            .load::<PageResult>(&cache_key(SOURCE, "list:/demo/"))
+            .is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
