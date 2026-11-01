@@ -784,7 +784,8 @@ pub fn spawn_workers(
                             let result = (|| -> Result<DecodedPoster, ()> {
                                 let client = source.get(&source_base).map_err(|_| ())?;
                                 let bytes = client.fetch_image(&url, None).map_err(|_| ())?;
-                                poster_cache.store(&path, &bytes).map_err(|_| ())?;
+                                // 缓存目录只读时仍应显示海报，落盘失败不阻断解码。
+                                let _ = poster_cache.store(&path, &bytes);
                                 poster_cache.decode(&bytes).map_err(|error| {
                                     if error.is_corrupt_image() {
                                         poster_cache.remove(&path);
@@ -797,10 +798,9 @@ pub fn spawn_workers(
                             if poster_epoch.load(Ordering::SeqCst) != epoch {
                                 continue;
                             }
-                            let result = poster_cache.read(&path).map_err(|error| {
-                                if error.is_corrupt_image() {
-                                    poster_cache.remove(&path);
-                                }
+                            let result = poster_cache.read(&path).map_err(|_| {
+                                // 文件损坏或不可读时删除，下一次请求改走网络。
+                                poster_cache.remove(&path);
                             });
                             (epoch, key, result)
                         }
