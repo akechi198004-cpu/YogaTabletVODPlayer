@@ -1,0 +1,7 @@
+/target/
+/dist/
+/cache/
+/config.toml
+/user_data.json
+/.local/
+*.log

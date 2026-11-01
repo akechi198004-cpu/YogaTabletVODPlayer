@@ -1,0 +1,10 @@
+# 星帆影视站点地址。一般不需要修改。
+source_base = "https://www.xingfan.cc"
+
+# VLC 可执行文件路径。留空时程序会在常见安装位置和 PATH 中自动查找。
+# Windows 示例：vlc_path = "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
+# 32 位 VLC 也可能安装在 C:\Program Files (x86)\VideoLAN\VLC\vlc.exe
+vlc_path = ""
+
+# night = 夜间深蓝灰；day = 白天浅灰蓝
+theme = "night"

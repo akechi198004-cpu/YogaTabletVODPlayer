@@ -1,0 +1,5 @@
+# HM影视 Windows 32 位发布包默认配置。
+# vlc_path 留空：首次启动自动检测 VLC；也可以在设置页手动填写。
+source_base = "https://www.xingfan.cc"
+vlc_path = ""
+theme = "night"

@@ -1,0 +1,6 @@
+# 32 位 Windows 发布包静态链接 MSVC C 运行库，避免目标机器缺少 vcruntime140.dll。
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

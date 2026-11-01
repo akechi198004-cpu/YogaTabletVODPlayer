@@ -1,0 +1,67 @@
+name: Windows Win32 Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "win32_app/**"
+      - ".github/workflows/windows-win32.yml"
+  pull_request:
+    paths:
+      - "win32_app/**"
+      - ".github/workflows/windows-win32.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: hm-video-win32
+  TARGET: i686-pc-windows-msvc
+  PACKAGE_NAME: HMVideo-win32
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: win32_app
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: win32_app -> target
+          key: ${{ env.TARGET }}
+
+      - name: Run tests (host target)
+        run: cargo test
+
+      - name: Build 32-bit release binary
+        run: cargo build --release --target $env:TARGET
+
+      - name: Prepare zip package
+        shell: pwsh
+        run: |
+          $packageRoot = "dist/${env:PACKAGE_NAME}"
+          New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+          Copy-Item "target/${env:TARGET}/release/${env:BIN_NAME}.exe" "$packageRoot/${env:BIN_NAME}.exe"
+          Copy-Item "assets/DroidSansFallbackFull.ttf" "$packageRoot/DroidSansFallbackFull.ttf"
+          Copy-Item "assets/DroidSansFallbackFull.LICENSE.txt" "$packageRoot/DroidSansFallbackFull.LICENSE.txt"
+          Copy-Item "packaging/windows/config.toml" "$packageRoot/config.toml"
+          Copy-Item "README.md" "$packageRoot/README.md"
+          Compress-Archive -Path $packageRoot -DestinationPath "dist/${env:PACKAGE_NAME}.zip" -Force
+
+      - name: Upload Win32 zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: win32_app/dist/${{ env.PACKAGE_NAME }}.zip
