@@ -479,6 +479,17 @@ enum MpvRawEvent {
     PipeClosed,
 }
 
+/// 管道读取线程产生原始事件时即绑定会话代次，避免出队时误用新 load_id。
+#[derive(Clone, Debug, PartialEq)]
+struct RawEvent {
+    load_id: u64,
+    event: MpvRawEvent,
+}
+
+fn raw_event_is_current(current_load_id: u64, raw: &RawEvent) -> bool {
+    raw.load_id != 0 && raw.load_id == current_load_id
+}
+
 fn parse_mpv_line(line: &str) -> Option<MpvRawEvent> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let event = value.get("event")?.as_str()?;
@@ -1033,8 +1044,8 @@ struct MpvWorker {
     mpv_path: PathBuf,
     command_rx: Receiver<PlayerCommand>,
     event_tx: Sender<EmbeddedEvent>,
-    raw_tx: Sender<MpvRawEvent>,
-    raw_rx: Receiver<MpvRawEvent>,
+    raw_tx: Sender<RawEvent>,
+    raw_rx: Receiver<RawEvent>,
     job: Option<Arc<JobObject>>,
     hwnd: Option<isize>,
     child: Option<std::process::Child>,
@@ -1152,7 +1163,7 @@ impl MpvWorker {
             });
             return;
         }
-        if let Err(error) = self.ensure_process(&options) {
+        if let Err(error) = self.ensure_process(load_id, &options) {
             self.send_event(EmbeddedEvent::Error {
                 load_id,
                 message: error,
@@ -1181,7 +1192,7 @@ impl MpvWorker {
         self.send_event(EmbeddedEvent::Loading { load_id });
     }
 
-    fn ensure_process(&mut self, options: &LoadOptions) -> Result<(), String> {
+    fn ensure_process(&mut self, load_id: u64, options: &LoadOptions) -> Result<(), String> {
         let hwnd = self.hwnd.ok_or_else(|| "视频窗口尚未就绪".to_owned())?;
         let pipe_name = pipe_name(std::process::id(), self.pipe_seq);
         self.pipe_seq = self.pipe_seq.wrapping_add(1);
@@ -1214,7 +1225,7 @@ impl MpvWorker {
                 return Err(format!("连接 mpv IPC 失败：{error}"));
             }
         };
-        let reader_done = match spawn_pipe_reader(pipe.clone(), self.raw_tx.clone()) {
+        let reader_done = match spawn_pipe_reader(pipe.clone(), self.raw_tx.clone(), load_id) {
             Ok(done) => done,
             Err(error) => {
                 pipe.close();
@@ -1272,21 +1283,20 @@ impl MpvWorker {
 
     fn drain_raw_events(&mut self) {
         while let Ok(raw) = self.raw_rx.try_recv() {
-            let load_id = self.current_load_id;
-            match raw {
+            if !raw_event_is_current(self.current_load_id, &raw) {
+                continue;
+            }
+            let load_id = raw.load_id;
+            match raw.event {
                 MpvRawEvent::StartFile => {
-                    if load_id != 0 {
-                        self.send_event(EmbeddedEvent::Loading { load_id });
-                    }
+                    self.send_event(EmbeddedEvent::Loading { load_id });
                 }
                 MpvRawEvent::FileLoaded => {
-                    if load_id != 0 {
-                        self.send_event(EmbeddedEvent::Playing { load_id });
-                    }
+                    self.send_event(EmbeddedEvent::Playing { load_id });
                 }
                 MpvRawEvent::EndFile { reason, error } => {
                     // redirect 不是会话结束：mpv 会继续加载新的 URL，不能清空当前 load_id。
-                    if load_id != 0 && reason != EndReason::Redirect {
+                    if reason != EndReason::Redirect {
                         self.send_event(EmbeddedEvent::Ended {
                             load_id,
                             reason,
@@ -1296,9 +1306,6 @@ impl MpvWorker {
                     }
                 }
                 MpvRawEvent::Property(property) => {
-                    if load_id == 0 {
-                        continue;
-                    }
                     // time-pos 通常每帧变化；限制到约 4 次/秒，降低 UI 和 IPC 负担。
                     if let PlayerProperty::TimePos(value) = property {
                         let changed = (value - self.last_time_pos_sent).abs() >= 0.25;
@@ -1405,7 +1412,8 @@ fn terminate_child_bounded(child: &mut std::process::Child, timeout: Duration) -
 #[cfg(windows)]
 fn spawn_pipe_reader(
     pipe: Arc<AsyncPipe>,
-    raw_tx: Sender<MpvRawEvent>,
+    raw_tx: Sender<RawEvent>,
+    load_id: u64,
 ) -> Result<Receiver<()>, String> {
     let (done_tx, done_rx) = mpsc::channel();
     thread::Builder::new()
@@ -1422,7 +1430,7 @@ fn spawn_pipe_reader(
                             let line: Vec<u8> = pending.drain(..=position).collect();
                             let text = String::from_utf8_lossy(&line[..line.len() - 1]);
                             if let Some(event) = parse_mpv_line(&text) {
-                                let _ = raw_tx.send(event);
+                                let _ = raw_tx.send(RawEvent { load_id, event });
                             }
                         }
                         if pending.len() > 1_048_576 {
@@ -1434,7 +1442,10 @@ fn spawn_pipe_reader(
                     Err(_) => break,
                 }
             }
-            let _ = raw_tx.send(MpvRawEvent::PipeClosed);
+            let _ = raw_tx.send(RawEvent {
+                load_id,
+                event: MpvRawEvent::PipeClosed,
+            });
             let _ = done_tx.send(());
         })
         .map_err(|error| error.to_string())?;
@@ -1478,6 +1489,25 @@ mod tests {
         assert!(args.contains(&"--user-agent=HMVideo/2.0".to_owned()));
         assert!(args.contains(&"--referrer=http://example.com/".to_owned()));
         assert!(args.contains(&"--volume=70".to_owned()));
+    }
+
+    #[test]
+    fn raw_events_keep_their_producing_session() {
+        let old = RawEvent {
+            load_id: 1,
+            event: MpvRawEvent::EndFile {
+                reason: EndReason::Error,
+                error: None,
+            },
+        };
+        let new = RawEvent {
+            load_id: 2,
+            event: MpvRawEvent::FileLoaded,
+        };
+        assert!(!raw_event_is_current(2, &old));
+        assert!(raw_event_is_current(1, &old));
+        assert!(raw_event_is_current(2, &new));
+        assert!(!raw_event_is_current(1, &new));
     }
 
     #[test]

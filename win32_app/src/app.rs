@@ -189,6 +189,153 @@ struct PlayerView {
     started_at: Instant,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PlayerEventOutcome {
+    Ignored,
+    Updated,
+    Loading,
+    Playing,
+    Ended,
+    Failed(String),
+}
+
+impl PlayerView {
+    fn valid_duration(&self) -> Option<f64> {
+        self.duration
+            .filter(|value| value.is_finite() && *value > 0.0)
+    }
+
+    fn clear_seek_target(&mut self) {
+        self.seek_target = None;
+    }
+
+    fn preview_seek_fraction(&mut self, fraction: f64) {
+        if let Some(duration) = self.valid_duration() {
+            self.seek_target = Some(fraction.clamp(0.0, 1.0) * duration);
+        } else {
+            self.seek_target = None;
+        }
+    }
+
+    /// 结束拖动并返回绝对秒数；无论是否有效都会清理 seek_target。
+    fn finish_seek_fraction(&mut self, fraction: f64) -> Option<f64> {
+        let target = self
+            .valid_duration()
+            .map(|duration| fraction.clamp(0.0, 1.0) * duration);
+        self.seek_target = None;
+        target
+    }
+
+    fn apply_property(&mut self, property: PlayerProperty) {
+        match property {
+            PlayerProperty::TimePos(value) => {
+                if value.is_finite() && value >= 0.0 && self.seek_target.is_none() {
+                    self.position = value;
+                }
+            }
+            PlayerProperty::Duration(value) => {
+                self.duration = value.filter(|value| value.is_finite() && *value > 0.0);
+                if self.duration.is_none() {
+                    // 时长未知/无效时不能保留拖动预览，否则后续 time-pos 会被永久遮蔽。
+                    self.seek_target = None;
+                }
+            }
+            PlayerProperty::Pause(paused) => {
+                if paused && matches!(self.status, PlayerStatus::Opening | PlayerStatus::Playing) {
+                    self.status = PlayerStatus::Paused;
+                } else if !paused && self.status == PlayerStatus::Paused {
+                    self.status = PlayerStatus::Playing;
+                }
+            }
+            PlayerProperty::Volume(value) => {
+                if value.is_finite() {
+                    self.volume = value.round().clamp(0.0, 100.0) as u8;
+                }
+            }
+        }
+    }
+
+    fn apply_event(&mut self, event: EmbeddedEvent) -> PlayerEventOutcome {
+        let load_id = match &event {
+            EmbeddedEvent::Loading { load_id }
+            | EmbeddedEvent::Playing { load_id }
+            | EmbeddedEvent::Ended { load_id, .. }
+            | EmbeddedEvent::ProcessExited { load_id, .. }
+            | EmbeddedEvent::Error { load_id, .. }
+            | EmbeddedEvent::Property { load_id, .. } => *load_id,
+        };
+        if load_id != self.session {
+            return PlayerEventOutcome::Ignored;
+        }
+        match event {
+            EmbeddedEvent::Loading { .. } => {
+                if self.status == PlayerStatus::Opening {
+                    PlayerEventOutcome::Loading
+                } else {
+                    PlayerEventOutcome::Ignored
+                }
+            }
+            EmbeddedEvent::Playing { .. } => {
+                if self.status == PlayerStatus::Opening {
+                    self.status = PlayerStatus::Playing;
+                    PlayerEventOutcome::Playing
+                } else {
+                    PlayerEventOutcome::Ignored
+                }
+            }
+            EmbeddedEvent::Property { property, .. } => {
+                self.apply_property(property);
+                PlayerEventOutcome::Updated
+            }
+            EmbeddedEvent::Ended { reason, error, .. } => match reason {
+                EndReason::Eof => PlayerEventOutcome::Ended,
+                EndReason::Error => PlayerEventOutcome::Failed(format!(
+                    "播放器无法继续解码该视频{}。",
+                    error.map(|error| format!("：{error}")).unwrap_or_default()
+                )),
+                EndReason::Stop | EndReason::Quit => {
+                    if self.status == PlayerStatus::Ended {
+                        PlayerEventOutcome::Ignored
+                    } else {
+                        PlayerEventOutcome::Failed(
+                            "播放器已停止，线路可能不可用或媒体已结束。".to_owned(),
+                        )
+                    }
+                }
+                EndReason::Redirect => PlayerEventOutcome::Ignored,
+            },
+            EmbeddedEvent::ProcessExited { code, .. } => {
+                if self.status == PlayerStatus::Ended {
+                    PlayerEventOutcome::Ignored
+                } else {
+                    PlayerEventOutcome::Failed(format!(
+                        "内置播放器进程意外退出（退出码 {}）。",
+                        code.map(|code| code.to_string())
+                            .unwrap_or_else(|| "未知".to_owned())
+                    ))
+                }
+            }
+            EmbeddedEvent::Error { message, .. } => {
+                PlayerEventOutcome::Failed(format!("内置播放器错误：{message}"))
+            }
+        }
+    }
+
+    fn mark_ended(&mut self) {
+        self.status = PlayerStatus::Ended;
+        self.seek_target = None;
+        if let Some(duration) = self.valid_duration() {
+            self.position = duration;
+        }
+    }
+
+    fn mark_failed(&mut self, error: String) {
+        self.status = PlayerStatus::Failed;
+        self.error = Some(error);
+        self.seek_target = None;
+    }
+}
+
 #[derive(Clone)]
 struct PlaySelection {
     work: WorkItem,
@@ -1309,108 +1456,32 @@ impl App {
     }
 
     fn handle_player_event(&mut self, event: EmbeddedEvent, ctx: &egui::Context) {
-        let Some(session) = self.player_view.as_ref().map(|view| view.session) else {
-            return;
+        let outcome = {
+            let Some(view) = self.player_view.as_mut() else {
+                return;
+            };
+            view.apply_event(event)
         };
-        let mut failure = None;
-        let mut ended = false;
-        if let Some(view) = self.player_view.as_mut() {
-            match event {
-                EmbeddedEvent::Loading { load_id } => {
-                    if load_id == session && view.status == PlayerStatus::Opening {
-                        self.status_text = format!("正在缓冲：{}…", view.episode_title);
-                    }
-                }
-                EmbeddedEvent::Playing { load_id } => {
-                    if load_id == session && view.status == PlayerStatus::Opening {
-                        view.status = PlayerStatus::Playing;
-                        self.status_text = format!("正在播放：{}", view.episode_title);
-                    }
-                }
-                EmbeddedEvent::Property { load_id, property } => {
-                    if load_id != session {
-                        return;
-                    }
-                    match property {
-                        PlayerProperty::TimePos(value) => {
-                            if value.is_finite() && value >= 0.0 && view.seek_target.is_none() {
-                                view.position = value;
-                            }
-                        }
-                        PlayerProperty::Duration(value) => {
-                            view.duration = value.filter(|value| *value > 0.0 && value.is_finite());
-                        }
-                        PlayerProperty::Pause(paused) => {
-                            if paused
-                                && matches!(
-                                    view.status,
-                                    PlayerStatus::Opening | PlayerStatus::Playing
-                                )
-                            {
-                                view.status = PlayerStatus::Paused;
-                            } else if !paused && view.status == PlayerStatus::Paused {
-                                view.status = PlayerStatus::Playing;
-                            }
-                        }
-                        PlayerProperty::Volume(value) => {
-                            if value.is_finite() {
-                                view.volume = value.round().clamp(0.0, 100.0) as u8;
-                            }
-                        }
-                    }
-                }
-                EmbeddedEvent::Ended {
-                    load_id,
-                    reason,
-                    error,
-                } => {
-                    if load_id != session {
-                        return;
-                    }
-                    match reason {
-                        EndReason::Eof => ended = true,
-                        EndReason::Error => {
-                            failure = Some(format!(
-                                "播放器无法继续解码该视频{}。",
-                                error.map(|error| format!("：{error}")).unwrap_or_default()
-                            ));
-                        }
-                        EndReason::Stop | EndReason::Quit => {
-                            failure = Some("播放器已停止，线路可能不可用或媒体已结束。".to_owned());
-                        }
-                        EndReason::Redirect => {}
-                    }
-                }
-                EmbeddedEvent::ProcessExited { load_id, code } => {
-                    if load_id == session && view.status != PlayerStatus::Ended {
-                        failure = Some(format!(
-                            "内置播放器进程意外退出（退出码 {}）。",
-                            code.map(|code| code.to_string())
-                                .unwrap_or_else(|| "未知".to_owned())
-                        ));
-                    }
-                }
-                EmbeddedEvent::Error { load_id, message } => {
-                    if load_id == session {
-                        failure = Some(format!("内置播放器错误：{message}"));
-                    }
+        match outcome {
+            PlayerEventOutcome::Ignored | PlayerEventOutcome::Updated => {}
+            PlayerEventOutcome::Loading => {
+                if let Some(view) = self.player_view.as_ref() {
+                    self.status_text = format!("正在缓冲：{}…", view.episode_title);
                 }
             }
-        }
-        if let Some(message) = failure {
-            self.fail_player(message, ctx);
-        } else if ended {
-            self.finish_player(ctx);
+            PlayerEventOutcome::Playing => {
+                if let Some(view) = self.player_view.as_ref() {
+                    self.status_text = format!("正在播放：{}", view.episode_title);
+                }
+            }
+            PlayerEventOutcome::Ended => self.finish_player(ctx),
+            PlayerEventOutcome::Failed(message) => self.fail_player(message, ctx),
         }
     }
 
     fn finish_player(&mut self, _ctx: &egui::Context) {
         if let Some(view) = self.player_view.as_mut() {
-            view.status = PlayerStatus::Ended;
-            view.seek_target = None;
-            if let Some(duration) = view.duration {
-                view.position = duration;
-            }
+            view.mark_ended();
         }
         self.video_window.hide();
         if let Some(player) = &self.embedded {
@@ -1424,8 +1495,7 @@ impl App {
             if view.status == PlayerStatus::Failed {
                 return;
             }
-            view.status = PlayerStatus::Failed;
-            view.error = Some(format!(
+            view.mark_failed(format!(
                 "{message}\n\n不会自动启动外部 VLC；可点击下方「改用 VLC 播放」，或到设置中切换播放方式。"
             ));
         }
@@ -2074,4 +2144,192 @@ fn poster_retry_delay(attempts: u32) -> Duration {
         .saturating_mul(multiplier as u128)
         .min(POSTER_RETRY_MAX.as_millis());
     Duration::from_millis(millis as u64)
+}
+
+#[cfg(test)]
+mod player_view_tests {
+    use super::*;
+
+    fn view(session: u64) -> PlayerView {
+        PlayerView {
+            session,
+            work: WorkItem::default(),
+            episode_url: "/test/1".to_owned(),
+            episode_title: "第01集".to_owned(),
+            episode_no: 1,
+            line_name: "线路1".to_owned(),
+            line_index: 0,
+            info: PlayInfo::default(),
+            media_url: "http://127.0.0.1/test.mp4".to_owned(),
+            media_title: "测试 · 第01集".to_owned(),
+            referer: None,
+            status: PlayerStatus::Opening,
+            error: None,
+            duration: None,
+            position: 0.0,
+            seek_target: None,
+            volume: 80,
+            started_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn stale_session_events_are_ignored_after_line_switch_or_replay() {
+        let mut view = view(1);
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Playing { load_id: 1 }),
+            PlayerEventOutcome::Playing
+        );
+        view.position = 12.0;
+        view.duration = Some(60.0);
+
+        // 换线路或重新播放会开启新会话；旧会话的结束/错误/属性事件必须全部丢弃。
+        view.session = 2;
+        view.status = PlayerStatus::Opening;
+        view.position = 0.0;
+        view.duration = None;
+        view.seek_target = None;
+
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Ended {
+                load_id: 1,
+                reason: EndReason::Eof,
+                error: None,
+            }),
+            PlayerEventOutcome::Ignored
+        );
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Error {
+                load_id: 1,
+                message: "old session".to_owned(),
+            }),
+            PlayerEventOutcome::Ignored
+        );
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::ProcessExited {
+                load_id: 1,
+                code: Some(1),
+            }),
+            PlayerEventOutcome::Ignored
+        );
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Property {
+                load_id: 1,
+                property: PlayerProperty::TimePos(55.0),
+            }),
+            PlayerEventOutcome::Ignored
+        );
+        assert_eq!(view.status, PlayerStatus::Opening);
+        assert_eq!(view.position, 0.0);
+        assert_eq!(view.duration, None);
+
+        // 新会话的事件仍然正常生效。
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Property {
+                load_id: 2,
+                property: PlayerProperty::Duration(Some(30.0)),
+            }),
+            PlayerEventOutcome::Updated
+        );
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Property {
+                load_id: 2,
+                property: PlayerProperty::TimePos(11.0),
+            }),
+            PlayerEventOutcome::Updated
+        );
+        assert_eq!(view.position, 11.0);
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Ended {
+                load_id: 2,
+                reason: EndReason::Eof,
+                error: None,
+            }),
+            PlayerEventOutcome::Ended
+        );
+    }
+
+    #[test]
+    fn unknown_duration_drag_does_not_block_later_progress() {
+        let mut view = view(1);
+        view.preview_seek_fraction(0.5);
+        assert_eq!(view.seek_target, None);
+
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Property {
+                load_id: 1,
+                property: PlayerProperty::Duration(Some(100.0)),
+            }),
+            PlayerEventOutcome::Updated
+        );
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Property {
+                load_id: 1,
+                property: PlayerProperty::TimePos(30.0),
+            }),
+            PlayerEventOutcome::Updated
+        );
+        assert_eq!(view.duration, Some(100.0));
+        assert_eq!(view.position, 30.0);
+        assert_eq!(view.seek_target, None);
+
+        view.preview_seek_fraction(0.5);
+        assert_eq!(view.seek_target, Some(50.0));
+        assert_eq!(view.finish_seek_fraction(0.5), Some(50.0));
+        assert_eq!(view.seek_target, None);
+
+        // 拖动结束后 time-pos 继续更新。
+        assert_eq!(
+            view.apply_event(EmbeddedEvent::Property {
+                load_id: 1,
+                property: PlayerProperty::TimePos(55.0),
+            }),
+            PlayerEventOutcome::Updated
+        );
+        assert_eq!(view.position, 55.0);
+    }
+
+    #[test]
+    fn invalid_duration_clears_seek_preview() {
+        let mut view = view(1);
+        view.duration = Some(60.0);
+        view.seek_target = Some(30.0);
+        view.apply_property(PlayerProperty::Duration(Some(0.0)));
+        assert_eq!(view.duration, None);
+        assert_eq!(view.seek_target, None);
+
+        view.preview_seek_fraction(0.5);
+        assert_eq!(view.seek_target, None);
+
+        view.duration = Some(f64::NAN);
+        view.seek_target = Some(10.0);
+        view.apply_property(PlayerProperty::Duration(Some(f64::NAN)));
+        assert_eq!(view.duration, None);
+        assert_eq!(view.seek_target, None);
+    }
+
+    #[test]
+    fn seek_target_is_cleared_on_finish_cancel_and_failure() {
+        let mut view = view(1);
+        view.duration = Some(60.0);
+        view.seek_target = Some(20.0);
+        view.clear_seek_target();
+        assert_eq!(view.seek_target, None);
+
+        view.seek_target = Some(20.0);
+        view.mark_failed("failed".to_owned());
+        assert_eq!(view.seek_target, None);
+        assert_eq!(view.status, PlayerStatus::Failed);
+
+        view.duration = Some(60.0);
+        view.seek_target = Some(20.0);
+        assert_eq!(view.finish_seek_fraction(0.5), Some(30.0));
+        assert_eq!(view.seek_target, None);
+
+        // 时长在拖动过程中失效：取消 seek，但不得留下 seek_target。
+        view.duration = None;
+        view.seek_target = Some(20.0);
+        assert_eq!(view.finish_seek_fraction(0.5), None);
+        assert_eq!(view.seek_target, None);
+    }
 }

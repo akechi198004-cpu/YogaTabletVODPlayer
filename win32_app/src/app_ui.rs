@@ -282,11 +282,12 @@ impl App {
                     Vec2::new(ui.available_width(), 22.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        let duration = view.duration.unwrap_or(0.0);
+                        let duration = view.valid_duration().unwrap_or(0.0);
+                        let seekable = duration > 0.0;
                         let position = view
                             .seek_target
                             .unwrap_or(view.position)
-                            .clamp(0.0, duration.max(0.0));
+                            .clamp(0.0, duration);
                         ui.label(
                             RichText::new(format_clock(position))
                                 .size(11.0)
@@ -295,28 +296,38 @@ impl App {
                         let bar_width = (ui.available_width() - 130.0).max(120.0);
                         let (bar_rect, response) = ui.allocate_exact_size(
                             Vec2::new(bar_width, 20.0),
-                            Sense::click_and_drag(),
+                            if seekable {
+                                Sense::click_and_drag()
+                            } else {
+                                Sense::hover()
+                            },
                         );
+                        let track_left = bar_rect.left() + 6.0;
+                        let track_right = bar_rect.right() - 6.0;
                         let mut preview = view.seek_target.unwrap_or(position);
-                        if response.dragged() {
+                        if seekable && response.dragged() {
                             if let Some(pointer) = response.interact_pointer_pos() {
-                                let track_left = bar_rect.left() + 6.0;
-                                let track_width = (bar_rect.width() - 12.0).max(1.0);
-                                let fraction =
-                                    ((pointer.x - track_left) / track_width).clamp(0.0, 1.0) as f64;
-                                preview = fraction * duration;
-                                if let Some(view) = self.player_view.as_mut() {
-                                    view.seek_target = Some(preview);
+                                let fraction = ((pointer.x - track_left)
+                                    / (track_right - track_left).max(1.0))
+                                .clamp(0.0, 1.0)
+                                    as f64;
+                                if let Some(player_view) = self.player_view.as_mut() {
+                                    player_view.preview_seek_fraction(fraction);
+                                    preview = player_view.seek_target.unwrap_or(preview);
                                 }
                             }
+                        } else if !seekable {
+                            // 时长未知/无效时禁止拖动，并清掉任何残留的拖动预览。
+                            if let Some(player_view) = self.player_view.as_mut() {
+                                player_view.clear_seek_target();
+                            }
+                            preview = position;
                         }
-                        let fraction = if duration > 0.0 {
+                        let fraction = if seekable {
                             (preview / duration).clamp(0.0, 1.0) as f32
                         } else {
                             0.0
                         };
-                        let track_left = bar_rect.left() + 6.0;
-                        let track_right = bar_rect.right() - 6.0;
                         let center_y = bar_rect.center().y;
                         let track = egui::Rect::from_min_max(
                             egui::pos2(track_left, center_y - 1.5),
@@ -330,22 +341,45 @@ impl App {
                         painter.rect_filled(filled, 2.0, colors().accent);
                         painter.circle_filled(
                             egui::pos2(handle_x, center_y),
-                            if response.hovered() { 7.5 } else { 6.5 },
-                            colors().text,
-                        );
-                        if duration > 0.0 && (response.clicked() || response.drag_stopped()) {
-                            let target = if let Some(pointer) = response.interact_pointer_pos() {
-                                let fraction = ((pointer.x - track_left)
-                                    / (track_right - track_left).max(1.0))
-                                .clamp(0.0, 1.0)
-                                    as f64;
-                                fraction * duration
+                            if seekable && response.hovered() {
+                                7.5
                             } else {
-                                preview
+                                6.5
+                            },
+                            if seekable {
+                                colors().text
+                            } else {
+                                colors().muted
+                            },
+                        );
+                        if seekable && (response.clicked() || response.drag_stopped()) {
+                            let fraction = if let Some(pointer) = response.interact_pointer_pos() {
+                                ((pointer.x - track_left) / (track_right - track_left).max(1.0))
+                                    .clamp(0.0, 1.0) as f64
+                            } else {
+                                (preview / duration).clamp(0.0, 1.0)
                             };
-                            seek_request = Some(target);
+                            if let Some(player_view) = self.player_view.as_mut() {
+                                seek_request = player_view.finish_seek_fraction(fraction);
+                            }
+                        } else if response.drag_stopped() || response.clicked() {
+                            // 时长在拖动过程中变为未知/无效：取消本次 seek。
+                            if let Some(player_view) = self.player_view.as_mut() {
+                                player_view.finish_seek_fraction(0.0);
+                            }
                         }
-                        if response.hovered() {
+                        if !response.dragged()
+                            && !response.drag_stopped()
+                            && !response.clicked()
+                            && !ui.input(|input| input.pointer.primary_down())
+                        {
+                            if let Some(player_view) = self.player_view.as_mut() {
+                                if player_view.seek_target.is_some() {
+                                    player_view.clear_seek_target();
+                                }
+                            }
+                        }
+                        if seekable && response.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         ui.label(
